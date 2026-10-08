@@ -394,7 +394,7 @@ def params(cmd, values):
 
 def area_lines(area):
     title, cmds = AREAS[area]
-    lines = [f"\n  {bold(title)}"]
+    lines = [f"  {bold(title)}"]
     for cmd in cmds:
         usage = " ".join([area, cmd.verb, *(f"<{a.name}>" if a.default is None else f"[{a.name}]" for a in cmd.args)])
         lines.append(f"    {usage:<44} {cmd.text}")
@@ -404,14 +404,15 @@ def area_lines(area):
 def config_lines():
     names = ", ".join(SETTINGS)
     return [
-        f"\n  {bold('Settings')}",
+        f"  {bold('Settings')}",
         f"    {'config show':<44} Show the settings",
         f"    {'config set <name> <on|off>':<44} Change a setting. Names: {names}",
     ]
 
 
 def help_text():
-    return "\n".join([__doc__, "Other commands:", *(line for area in AREAS for line in area_lines(area)), *config_lines()])
+    sections = [area_lines(area) for area in AREAS] + [config_lines()]
+    return "\n".join([__doc__, "Other commands:", *(line for lines in sections for line in ["", *lines])])
 
 
 class Parser(argparse.ArgumentParser):
