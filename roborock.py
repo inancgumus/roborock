@@ -45,14 +45,17 @@ from roborock.roborock_typing import RoborockCommand
 from roborock.web_api import RoborockApiClient
 
 CONFIG_FILE = Path(user_config_dir("roborock")) / "config.json"
+LOG_DIR = Path(user_log_dir("roborock"))
 SETTINGS = {"bumper": 'Resume the clean when the robot reports "bumper stuck"'}  # all on by default
 SERVICE = "io.github.inancgumus.roborock"
-HOST, PORT = (
-    "127.0.0.1",
-    int(os.environ.get("ROBORROCK_PORT", 47651)),
-)  # the server only listens on this computer
+SESSION = ("roborock", "session")  # the keychain entry holding the login
+SERVER = ("roborock", "server")  # the keychain entry holding the server's secret
+HOST = "127.0.0.1"  # the server only listens on this computer
+PORT = int(os.environ.get("ROBORROCK_PORT", 47651))
 API_URL = os.environ.get("ROBORROCK_API_URL")  # replaces Roborock's own servers, for testing
-
+NO_SERVER = (
+    "No server is running. Start one in another terminal with ./roborock.py, then try again."
+)
 
 # Plain app_start would restart a room or zone clean from scratch
 RESUME_COMMANDS = {
@@ -106,8 +109,8 @@ async def sweeping(text):
 
 
 def setup_logging(verbose):
-    log_file = Path(user_log_dir("roborock")) / "roborock.log"
-    log_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    log_file = LOG_DIR / "roborock.log"
+    LOG_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     handlers = [logging.handlers.RotatingFileHandler(log_file, maxBytes=1_000_000, backupCount=3)]
     if verbose:
         handlers.append(logging.StreamHandler())
@@ -120,9 +123,8 @@ async def login(email):
     client = RoborockApiClient(email, base_url=API_URL)
     await client.request_code()
     user_data = await client.code_login(input(bold("Code from email: ")).strip())
-    keyring.set_password(
-        "roborock", "session", json.dumps({"email": email, "user_data": user_data.as_dict()})
-    )
+    session = {"email": email, "user_data": user_data.as_dict()}
+    keyring.set_password(*SESSION, json.dumps(session))
     say("Logged in.")
 
 
@@ -169,7 +171,7 @@ async def watch(call):
 
 @contextlib.asynccontextmanager
 async def connect():
-    saved = json.loads(keyring.get_password("roborock", "session"))
+    saved = json.loads(keyring.get_password(*SESSION))
     params = UserParams(saved["email"], UserData.from_dict(saved["user_data"]), base_url=API_URL)
     async with sweeping("Connecting to your account"):
         manager = await create_device_manager(params)
@@ -181,19 +183,22 @@ async def connect():
         await manager.close()
 
 
-def params(cmd, values):
+def payload(cmd, values):
+    """What the robot receives for a command, built from the arguments it was given."""
     if cmd.fixed is not None:
         return cmd.fixed
     if cmd.keys:
         fields = dict(zip(cmd.keys, values))
         return [fields] if cmd.boxed else fields
-    return [
-        part for value in values for part in (value if isinstance(value, list) else [value])
-    ] or None
+    flat = []
+    for value in values:
+        flat += value if isinstance(value, list) else [value]
+    return flat or None
 
 
 def sections():
-    return [("", TOP), *AREAS.items()]
+    """Every group of commands as (prefix, title, commands). Single-word commands have no prefix."""
+    return [("", *TOP), *((area, *group) for area, group in AREAS.items())]
 
 
 def usage(prefix, cmd):
@@ -201,23 +206,25 @@ def usage(prefix, cmd):
     return " ".join(filter(None, [prefix, cmd.name, *needs]))
 
 
-def section_lines(prefix, section):
-    title, cmds = section
-    width = max(len(usage(p, c)) for p, (_, cs) in sections() for c in cs)
+def usage_width():
+    return max(len(usage(prefix, cmd)) for prefix, _, cmds in sections() for cmd in cmds)
+
+
+def section_lines(prefix, title, cmds):
+    width = usage_width()
     return [f"  {bold(title)}", *(f"    {usage(prefix, c):<{width}}  {c.text}" for c in cmds)]
 
 
 def help_text():
-    blocks = ("\n".join(section_lines(prefix, section)) for prefix, section in sections())
+    blocks = ("\n".join(section_lines(*section)) for section in sections())
     return "\n\n".join([__doc__.rstrip(), "Commands:", *blocks])
 
 
 class Parser(argparse.ArgumentParser):
     def error(self, message):
         if "invalid choice" in message:
-            message = (
-                f"unknown command {message.split(chr(39))[1]!r}. Run ./roborock.py -h to list them"
-            )
+            name = message.split("'")[1]
+            message = f"unknown command {name!r}. Run ./roborock.py -h to list them"
         self.print_usage(sys.stderr)
         error(f"{self.prog}: error: {message}")
         sys.exit(2)
@@ -226,21 +233,43 @@ class Parser(argparse.ArgumentParser):
 def build_parser():
     parser = Parser(prog="./roborock.py", add_help=False)
     top = parser.add_subparsers(dest="area", metavar="<command>", parser_class=Parser)
-    for prefix, (title, cmds) in sections():
+    for prefix, title, cmds in sections():
         parents = top
         if prefix:
-            parents = top.add_parser(
-                prefix, prog=f"./roborock.py {prefix}", description=title
-            ).add_subparsers(dest="verb", metavar="<command>", parser_class=Parser)
+            area = top.add_parser(prefix, prog=f"./roborock.py {prefix}", description=title)
+            parents = area.add_subparsers(metavar="<command>", parser_class=Parser)
         for cmd in cmds:
             prog = " ".join(filter(None, ["./roborock.py", prefix, cmd.name]))
             sub = parents.add_parser(cmd.name, prog=prog, description=cmd.text)
+            sub.set_defaults(cmd=cmd)
             for arg in cmd.args:
                 optional = {"nargs": "?", "default": arg.default} if arg.default is not None else {}
                 sub.add_argument(
                     arg.name, type=arg.parse, help=arg.help, metavar=arg.name, **optional
                 )
     return parser
+
+
+def handler(command, secret):
+    """Answers one request from a command, as one line of JSON in and one line out."""
+
+    async def handle(reader, writer):
+        try:
+            message = json.loads(await reader.readline())
+            if not hmac.compare_digest(message["secret"], secret):
+                raise PermissionError("wrong secret")
+            result = await command.send(RoborockCommand(message["command"]), message["params"])
+            reply = {"result": result}
+            logging.info("Ran %s", message["command"])
+        except Exception as err:
+            logging.warning("Command failed: %s", err)
+            reply = {"error": f"{type(err).__name__}: {err}"}
+        with contextlib.suppress(ConnectionError):  # the client left before the reply
+            writer.write(json.dumps(reply, default=str).encode() + b"\n")
+            await writer.drain()
+        writer.close()
+
+    return handle
 
 
 async def serve():
@@ -252,35 +281,17 @@ async def serve():
         writer.close()
         print(help_text())
         return
-    if keyring.get_password("roborock", "session") is None:
+    if keyring.get_password(*SESSION) is None:
         await login(input(bold("Roborock email: ")).strip())
     async with connect() as vacuum:
         command = vacuum.v1_properties.command
-        secret = secrets.token_hex(
-            16
-        )  # keeps other programs on this computer from sending commands
-
-        async def handle(reader, writer):
-            try:
-                request = json.loads(await reader.readline())
-                if not hmac.compare_digest(request["secret"], secret):
-                    raise PermissionError("wrong secret")
-                result = await command.send(RoborockCommand(request["command"]), request["params"])
-                reply = {"result": result}
-                logging.info("Ran %s", request["command"])
-            except Exception as err:
-                logging.warning("Command failed: %s", err)
-                reply = {"error": f"{type(err).__name__}: {err}"}
-            with contextlib.suppress(ConnectionError):  # the client left before the reply
-                writer.write(json.dumps(reply, default=str).encode() + b"\n")
-                await writer.drain()
-            writer.close()
-
+        # Keeps other programs on this computer from sending commands
+        secret = secrets.token_hex(16)
         try:
-            server = await asyncio.start_server(handle, HOST, PORT)
+            server = await asyncio.start_server(handler(command, secret), HOST, PORT)
         except OSError as err:
             fail(f"Cannot listen on port {PORT}: {err}")
-        keyring.set_password("roborock", "server", secret)
+        keyring.set_password(*SERVER, secret)
         say(f"🎉 Ready! Serving {vacuum.name}. Leave this running.")
         say("In another terminal, run ./roborock.py <command>, like ./roborock.py find.")
         if load_config()["bumper"]:
@@ -293,59 +304,42 @@ async def serve():
             watcher.cancel()
 
 
-def service_files():
-    command = [
-        shutil.which("uv") or fail("Cannot find uv on your PATH."),
-        "run",
-        "--script",
-        str(Path(__file__).resolve()),
-    ]
+def service_file():
     if sys.platform == "darwin":
-        return command, Path.home() / "Library/LaunchAgents" / f"{SERVICE}.plist"
-    return command, Path.home() / ".config/systemd/user/roborock.service"
+        return Path.home() / "Library/LaunchAgents" / f"{SERVICE}.plist"
+    return Path.home() / ".config/systemd/user/roborock.service"
+
+
+def launch_domain():
+    return f"gui/{os.getuid()}"
 
 
 def install():
-    if keyring.get_password("roborock", "session") is None:
+    if keyring.get_password(*SESSION) is None:
         fail("Log in first. Run ./roborock.py once, then run install again.")
-    command, file = service_files()
-    log = Path(user_log_dir("roborock")) / "service.log"
+    uv = shutil.which("uv") or fail("Cannot find uv on your PATH.")
+    command = [uv, "run", "--script", str(Path(__file__).resolve())]
+    file = service_file()
     if sys.platform == "win32":
-        subprocess.run(
-            [
-                "schtasks",
-                "/Create",
-                "/TN",
-                "roborock",
-                "/SC",
-                "ONLOGON",
-                "/F",
-                "/TR",
-                subprocess.list2cmdline(command),
-            ],
-            check=True,
-        )
+        create = ["schtasks", "/Create", "/TN", "roborock", "/SC", "ONLOGON", "/F"]
+        subprocess.run([*create, "/TR", subprocess.list2cmdline(command)], check=True)
         subprocess.run(["schtasks", "/Run", "/TN", "roborock"], check=True)
     elif sys.platform == "darwin":
+        log = LOG_DIR / "service.log"
+        launchd = {
+            "Label": SERVICE,
+            "ProgramArguments": command,
+            "RunAtLoad": True,
+            # A second server exits cleanly and stays stopped
+            "KeepAlive": {"SuccessfulExit": False},
+            "StandardOutPath": str(log),
+            "StandardErrorPath": str(log),
+        }
         file.parent.mkdir(parents=True, exist_ok=True)
-        file.write_bytes(
-            plistlib.dumps(
-                {
-                    "Label": SERVICE,
-                    "ProgramArguments": command,
-                    "RunAtLoad": True,
-                    "KeepAlive": {
-                        "SuccessfulExit": False
-                    },  # a second server exits cleanly and stays stopped
-                    "StandardOutPath": str(log),
-                    "StandardErrorPath": str(log),
-                }
-            )
-        )
-        subprocess.run(
-            ["launchctl", "bootout", f"gui/{os.getuid()}/{SERVICE}"], capture_output=True
-        )
-        subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(file)], check=True)
+        file.write_bytes(plistlib.dumps(launchd))
+        bootout = ["launchctl", "bootout", f"{launch_domain()}/{SERVICE}"]
+        subprocess.run(bootout, capture_output=True)
+        subprocess.run(["launchctl", "bootstrap", launch_domain(), str(file)], check=True)
     else:
         file.parent.mkdir(parents=True, exist_ok=True)
         file.write_text(
@@ -358,13 +352,12 @@ def install():
 
 
 def uninstall():
-    _, file = service_files()
+    file = service_file()
     if sys.platform == "win32":
         subprocess.run(["schtasks", "/Delete", "/TN", "roborock", "/F"], check=True)
     elif sys.platform == "darwin":
-        subprocess.run(
-            ["launchctl", "bootout", f"gui/{os.getuid()}/{SERVICE}"], capture_output=True
-        )
+        bootout = ["launchctl", "bootout", f"{launch_domain()}/{SERVICE}"]
+        subprocess.run(bootout, capture_output=True)
         file.unlink(missing_ok=True)
     else:
         subprocess.run(["systemctl", "--user", "disable", "--now", "roborock.service"], check=True)
@@ -374,18 +367,15 @@ def uninstall():
 
 
 async def request(command, params):
-    secret = keyring.get_password("roborock", "server")
+    secret = keyring.get_password(*SERVER)
+    if secret is None:
+        fail(NO_SERVER)
     try:
-        if secret is None:
-            raise ConnectionRefusedError
         reader, writer = await asyncio.open_connection(HOST, PORT)
     except ConnectionRefusedError:
-        fail(
-            "No server is running. Start one in another terminal with ./roborock.py, then try again."
-        )
-    writer.write(
-        json.dumps({"secret": secret, "command": command.value, "params": params}).encode() + b"\n"
-    )
+        fail(NO_SERVER)
+    message = {"secret": secret, "command": command.value, "params": params}
+    writer.write(json.dumps(message).encode() + b"\n")
     reply = json.loads(await reader.readline())
     writer.close()
     if "error" in reply:
@@ -598,20 +588,8 @@ AREAS = {
     "drying": (
         "Mop drying",
         [
-            Cmd(
-                "start",
-                "app_set_dryer_status",
-                "Dry the mop now",
-                keys=("status",),
-                fixed={"status": 1},
-            ),
-            Cmd(
-                "stop",
-                "app_set_dryer_status",
-                "Stop drying the mop",
-                keys=("status",),
-                fixed={"status": 0},
-            ),
+            Cmd("start", "app_set_dryer_status", "Dry the mop now", fixed={"status": 1}),
+            Cmd("stop", "app_set_dryer_status", "Stop drying the mop", fixed={"status": 0}),
             Cmd(
                 "show", "app_get_dryer_setting", "Show whether the dock dries the mop after a clean"
             ),
@@ -832,15 +810,13 @@ def main():
             asyncio.run(serve())
             return
         args = build_parser().parse_args(argv)
-        verb = getattr(args, "verb", None)
-        if args.area in AREAS and not verb:
-            print("\n".join(section_lines(args.area, AREAS[args.area])))
+        cmd = getattr(args, "cmd", None)
+        if cmd is None:  # only an area was given
+            print("\n".join(section_lines(args.area, *AREAS[args.area])))
             return
-        cmds = AREAS[args.area][1] if args.area in AREAS else TOP[1]
-        cmd = next(c for c in cmds if c.name == (verb or args.area))
         values = [getattr(args, arg.name) for arg in cmd.args]
         if cmd.run is None:
-            asyncio.run(send(RoborockCommand(cmd.command), params(cmd, values)))
+            asyncio.run(send(RoborockCommand(cmd.command), payload(cmd, values)))
         elif inspect.iscoroutinefunction(cmd.run):
             asyncio.run(cmd.run(*values))
         else:
