@@ -71,3 +71,11 @@ Settings are on by default. Turn one off or on again with `config set`:
 Logs go to a file in your user log folder, not to the terminal.
 
 Add `-v` to any command to see them on screen too.
+
+## Tests
+
+The tests start fake Roborock servers on real local ports. They run the real server and commands against them, with nothing mocked.
+
+```sh
+./tests/test_roborock.py
+```

@@ -24,6 +24,14 @@ Use the `write` skill for the README and every other piece of prose, if it is av
 Never print the login token, the server secret or the robot's serial number.
 Commands that read them must not echo them.
 
+## Tests
+
+Run `./tests/test_roborock.py` before every commit.
+
+- Write integration tests only. No unit tests and no mocks.
+- Run the real server and the real commands against the fake servers in `tests/fakes.py`.
+- Add a test with every change in behavior, in the same commit.
+
 ## Commits
 
 Use the `git-commit` skill if it is available. Keep each commit to one change, with its README update.
