@@ -6,8 +6,8 @@
 """Control a Roborock vacuum.
 
 Usage:
-    ./roborock.py                        Start the server. Do this first, in its own terminal
-    ./roborock.py login you@example.com  Log in with an emailed code
+    ./roborock.py                        Start the server, logging in with an emailed code if needed.
+                                         Do this first, in its own terminal
     ./roborock.py nobumperstuck          Resume each time it reports "bumper stuck"
     ./roborock.py find                   Say "I'm over here"
     ./roborock.py start                  Start cleaning
@@ -313,7 +313,6 @@ class Parser(argparse.ArgumentParser):
 def build_parser():
     parser = Parser(prog="./roborock.py", add_help=False)
     commands = parser.add_subparsers(dest="name", metavar="<command>", parser_class=Parser)
-    commands.add_parser("login", description="Log in with an emailed code").add_argument("email")
     commands.add_parser("nobumperstuck", description='Resume each time it reports "bumper stuck"')
     for name, (_, text) in ALIASES.items():
         commands.add_parser(name, description=text)
@@ -334,6 +333,8 @@ async def serve():
     else:
         writer.close()
         sys.exit("A server is already running. Run ./roborock.py -h to see the commands.")
+    if not SESSION_FILE.exists():
+        await login(input("Roborock email: ").strip())
     async with connect() as vacuum:
         command = vacuum.v1_properties.command
 
@@ -398,9 +399,7 @@ def main():
     args = build_parser().parse_args()
     cmds = {cmd.name: cmd for group in GROUPS.values() for cmd in group}
     try:
-        if args.name == "login":
-            asyncio.run(login(args.email))
-        elif args.name == "nobumperstuck":
+        if args.name == "nobumperstuck":
             asyncio.run(run())
         elif args.name in ALIASES:
             asyncio.run(send(RoborockCommand(ALIASES[args.name][0]), None))
