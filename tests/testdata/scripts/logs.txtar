@@ -1,0 +1,14 @@
+# Logs always go to a file, and -v also prints them
+stdin login.txt
+exec roborock -v &
+await 'Starting MQTT session'
+await 'Ready!'
+exec roborock volume show
+[darwin] grep 'Ran get_sound_volume' $HOME/Library/Logs/roborock/roborock.log
+[darwin] grep 'Starting MQTT session' $HOME/Library/Logs/roborock/roborock.log
+[linux] grep 'Ran get_sound_volume' $HOME/.local/state/roborock/log/roborock.log
+[linux] grep 'Starting MQTT session' $HOME/.local/state/roborock/log/roborock.log
+
+-- login.txt --
+me@example.com
+123456

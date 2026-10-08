@@ -1,0 +1,50 @@
+# The server clears "bumper stuck" and resumes the clean
+stdin login.txt
+exec roborock &
+await 'Ready!'
+await 'resumes the clean on its own'
+vacuum clear
+
+vacuum set state 12
+vacuum set error_code 2
+vacuum set in_cleaning 3
+vacuum await state 5
+vacuum await error_code 0
+vacuum sent resolve_error '{"error_code": 2}'
+vacuum sent resume_segment_clean '[]'
+
+# A zone clean resumes as a zone clean
+vacuum clear
+vacuum set state 12
+vacuum set error_code 2
+vacuum set in_cleaning 2
+vacuum await state 5
+vacuum sent resume_zoned_clean '[]'
+
+# Other errors are left alone
+vacuum clear
+vacuum set state 12
+vacuum set error_code 1
+sleep 4
+! vacuum sent resolve_error
+
+# Turned off, it leaves the robot stuck
+vacuum set state 8
+vacuum set error_code 0
+exec roborock config set bumper off
+vacuum clear
+vacuum set state 12
+vacuum set error_code 2
+vacuum set in_cleaning 3
+sleep 4
+vacuum await error_code 2
+! vacuum sent resolve_error
+
+# Turned on again, it catches up
+exec roborock config set bumper on
+vacuum await state 5
+vacuum sent resolve_error '{"error_code": 2}'
+
+-- login.txt --
+me@example.com
+123456

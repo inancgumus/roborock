@@ -1,0 +1,38 @@
+stdin login.txt
+exec roborock &
+await 'Ready!'
+vacuum clear
+
+# Reading
+exec roborock status show
+stdout "'battery': 87"
+exec roborock rooms list
+stdout "\[1, '100', 1\]"
+
+# A setting can be read, changed and read again
+exec roborock volume show
+stdout '^\[30\]$'
+exec roborock volume set 40
+vacuum await volume 40
+exec roborock volume show
+stdout '^\[40\]$'
+
+# Plain words and numbers turn into what the robot expects
+exec roborock clean rooms 1,2
+vacuum sent app_segment_clean '[{"segments": [1, 2], "repeat": 1}]'
+exec roborock clean rooms 2 3
+vacuum sent app_segment_clean '[{"segments": [2], "repeat": 3}]'
+exec roborock quiet set 22:30 08:00
+vacuum sent set_dnd_timer '[22, 30, 8, 0]'
+exec roborock locks set on
+vacuum sent set_child_lock_status '{"lock_status": 1}'
+exec roborock lights set off
+vacuum sent set_led_status '[0]'
+exec roborock drying start
+vacuum sent app_set_dryer_status '{"status": 1}'
+exec roborock drying stop
+vacuum sent app_set_dryer_status '{"status": 0}'
+
+-- login.txt --
+me@example.com
+123456

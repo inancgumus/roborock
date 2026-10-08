@@ -1,0 +1,32 @@
+exec roborock -h
+stdout '^Usage:'
+stdout '^Commands:'
+stdout '^  Everyday'
+stdout '^    clean rooms <rooms> \[times\]'
+stdout '^    volume set <volume>'
+stdout '^    config set <name> <on\|off>'
+
+# An area alone lists only its own commands
+exec roborock clean
+stdout '^  Cleaning'
+stdout 'clean spot'
+! stdout 'Everyday'
+! stdout 'volume'
+
+# A command explains its input
+exec roborock quiet set -h
+stdout 'Set the hours the robot stays silent'
+stdout 'Start time, like 22:00'
+stdout 'End time, like 08:00'
+
+# Starting a second server lists the help instead
+stdin login.txt
+exec roborock &
+await 'Ready!'
+exec roborock
+stdout '^Commands:'
+stdout '^  Everyday'
+
+-- login.txt --
+me@example.com
+123456

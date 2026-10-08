@@ -1,0 +1,27 @@
+stdin login.txt
+exec roborock &
+await 'Ready!'
+vacuum clear
+
+exec roborock start
+vacuum await state 5
+exec roborock pause
+vacuum await state 10
+exec roborock stop
+vacuum await state 3
+exec roborock charge
+vacuum await state 8
+
+exec roborock find
+vacuum sent find_me '[]'
+
+# resume continues the kind of clean that was paused
+vacuum set state 10
+vacuum set in_cleaning 3
+exec roborock resume
+vacuum await state 5
+vacuum sent resume_segment_clean '[]'
+
+-- login.txt --
+me@example.com
+123456

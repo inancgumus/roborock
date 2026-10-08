@@ -1,0 +1,10 @@
+# A wrong code fails the login and no server starts
+stdin login.txt
+! exec roborock
+! stdout 'Ready!'
+stderr 'Invalid code'
+cloud asked me@example.com
+
+-- login.txt --
+me@example.com
+000000
