@@ -1,4 +1,4 @@
-Control a Roborock vacuum from the terminal, and resume it automatically when it reports "bumper stuck".
+Control a Roborock vacuum from the terminal.
 
 ## Quick start
 
