@@ -1,10 +1,5 @@
 Control a Roborock vacuum from the terminal, and resume it automatically when it reports "bumper stuck".
 
-## Requirements
-
-- [uv](https://docs.astral.sh/uv/), which installs the dependencies on the first run
-- A Roborock account with one vacuum
-
 ## Quick start
 
 Start the server in its own terminal and leave it running. It logs in with an emailed code the first time and keeps one connection to the vacuum open.
