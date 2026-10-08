@@ -6,17 +6,17 @@
 """Control a Roborock vacuum.
 
 Usage:
-    ./supervisor.py login you@example.com  Log in with an emailed code
-    ./supervisor.py nobumperstuck          Resume each time it reports "bumper stuck"
-    ./supervisor.py serve                  Keep one connection open so commands run fast
-    ./supervisor.py find                   Say "I'm over here"
-    ./supervisor.py start                  Start cleaning
-    ./supervisor.py pause                  Pause cleaning
-    ./supervisor.py stop                   Stop cleaning
-    ./supervisor.py charge                 Go back to the dock
-    ./supervisor.py <command>              Send any other command below
-    ./supervisor.py -h                     Show this help
-    ./supervisor.py <command> -h           Show what a command needs
+    ./roborock.py login you@example.com  Log in with an emailed code
+    ./roborock.py nobumperstuck          Resume each time it reports "bumper stuck"
+    ./roborock.py serve                  Keep one connection open so commands run fast
+    ./roborock.py find                   Say "I'm over here"
+    ./roborock.py start                  Start cleaning
+    ./roborock.py pause                  Pause cleaning
+    ./roborock.py stop                   Stop cleaning
+    ./roborock.py charge                 Go back to the dock
+    ./roborock.py <command>              Send any other command below
+    ./roborock.py -h                     Show this help
+    ./roborock.py <command> -h           Show what a command needs
 """
 import argparse
 import asyncio
@@ -29,6 +29,9 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
+
+# This file is named roborock.py, so its folder would shadow the roborock library
+sys.path = [p for p in sys.path if p != str(Path(__file__).resolve().parent)]
 
 from roborock.data import UserData
 from roborock.data.v1.v1_code_mappings import RoborockErrorCode, RoborockStateCode
@@ -308,12 +311,12 @@ def help_text():
 class Parser(argparse.ArgumentParser):
     def error(self, message):
         if "invalid choice" in message:
-            message = f"unknown command {message.split(chr(39))[1]!r}. Run ./supervisor.py -h to list them"
+            message = f"unknown command {message.split(chr(39))[1]!r}. Run ./roborock.py -h to list them"
         super().error(message)
 
 
 def build_parser():
-    parser = Parser(prog="./supervisor.py", add_help=False)
+    parser = Parser(prog="./roborock.py", add_help=False)
     commands = parser.add_subparsers(dest="name", metavar="<command>", parser_class=Parser)
     commands.add_parser("login", description="Log in with an emailed code").add_argument("email")
     commands.add_parser("serve", description="Keep one connection open so commands run fast")
@@ -322,7 +325,7 @@ def build_parser():
         commands.add_parser(name, description=text)
     for cmds in GROUPS.values():
         for cmd in cmds:
-            sub = commands.add_parser(cmd.name, prog=f"./supervisor.py {cmd.name}", description=cmd.text, formatter_class=argparse.RawDescriptionHelpFormatter)
+            sub = commands.add_parser(cmd.name, prog=f"./roborock.py {cmd.name}", description=cmd.text, formatter_class=argparse.RawDescriptionHelpFormatter)
             for arg in cmd.args:
                 optional = {"nargs": "?", "default": arg.default} if arg.default is not None else {}
                 sub.add_argument(arg.name, type=arg.parse, help=arg.help, metavar=arg.name, **optional)
