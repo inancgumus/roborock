@@ -51,3 +51,9 @@ It checks every second until you stop it with Ctrl-C:
 ```sh
 ./roborock.py nobumperstuck
 ```
+
+## Logs
+
+Logs go to a file in your user log folder, not to the terminal.
+
+Add `-v` to any command to see them on screen too.
