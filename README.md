@@ -51,10 +51,3 @@ It checks every second until you stop it with Ctrl-C:
 ```sh
 ./roborock.py nobumperstuck
 ```
-
-## Files
-
-| File | Holds |
-| --- | --- |
-| `~/.roborock-autoresume.json` | The login token |
-| `~/.roborock-supervisor.sock` | Where commands reach the server. Only you can connect |
