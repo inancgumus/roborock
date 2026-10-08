@@ -359,7 +359,8 @@ async def serve():
         pass
     else:
         writer.close()
-        sys.exit("A server is already running. Run ./roborock.py -h to see the commands.")
+        print(help_text())
+        return
     if keyring.get_password("roborock", "session") is None:
         await login(input("Roborock email: ").strip())
     async with connect() as vacuum:
