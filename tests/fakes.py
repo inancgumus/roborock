@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 
 import aiomqtt
 from aiohttp import web
+from paho.mqtt.client import topic_matches_sub
+from paho.mqtt.properties import VariableByteIntegers
 from roborock.data import (
     HomeData,
     HomeDataDevice,
@@ -22,14 +24,18 @@ from roborock.data import (
     RRiot,
     UserData,
 )
-from roborock.protocol import create_mqtt_decoder, create_mqtt_encoder, md5hex
+from roborock.protocol import create_mqtt_decoder, create_mqtt_encoder, create_mqtt_params
 from roborock.roborock_message import RoborockMessage, RoborockMessageProtocol
 
 EMAIL_CODE = "123456"
 DUID = "fake-duid"
 LOCAL_KEY = "fake_localkey_16b"
 USER = RRiot(
-    u="user123", s="pass123", h="unknown123", k="qiCNieZa", r=Reference(r="US", a="", l="", m="")
+    u="user123",
+    s="pass123",
+    h="unknown123",
+    k="qiCNieZa",
+    r=Reference(r="US", a="", l="", m="tcp://127.0.0.1:1"),
 )
 
 
@@ -50,7 +56,7 @@ class Broker:
         await self.server.wait_closed()
 
     @staticmethod
-    async def read_varint(reader):
+    async def read_length(reader):
         value, shift = 0, 0
         while True:
             byte = (await reader.readexactly(1))[0]
@@ -60,76 +66,47 @@ class Broker:
             shift += 7
 
     @staticmethod
-    def varint(value):
-        out = bytearray()
-        while True:
-            byte, value = value & 0x7F, value >> 7
-            out.append(byte | (0x80 if value else 0))
-            if not value:
-                return bytes(out)
+    def after_properties(body, at):
+        """Where the packet continues after the properties that start at `at`."""
+        length, used = VariableByteIntegers.decode(body[at:])
+        return at + used + length
 
     @staticmethod
-    def skip_properties(body, at):
-        length, shift = 0, 0
-        while True:
-            byte = body[at]
-            at += 1
-            length |= (byte & 0x7F) << shift
-            if not byte & 0x80:
-                return at + length
-            shift += 7
+    def topic_filters(body, option_bytes):
+        """The topics in a SUBSCRIBE (one option byte each) or UNSUBSCRIBE packet."""
+        at = Broker.after_properties(body, 2)
+        while at < len(body):
+            size = int.from_bytes(body[at : at + 2], "big")
+            yield body[at + 2 : at + 2 + size].decode()
+            at += 2 + size + option_bytes
 
     @staticmethod
-    def matches(pattern, topic):
-        want, got = pattern.split("/"), topic.split("/")
-        for i, part in enumerate(want):
-            if part == "#":
-                return True
-            if i >= len(got) or part not in ("+", got[i]):
-                return False
-        return len(want) == len(got)
+    def packet(kind, content):
+        return bytes([kind]) + VariableByteIntegers.encode(len(content)) + content
+
+    @staticmethod
+    def ack(kind, body, topics):
+        """The answer to a SUBSCRIBE or UNSUBSCRIBE: its id, no properties, success per topic."""
+        return Broker.packet(kind, body[:2] + b"\x00" + bytes(len(topics)))
 
     async def handle(self, reader, writer):
         self.subscribers[writer] = []
         try:
             while True:
                 first = (await reader.readexactly(1))[0]
-                body = await reader.readexactly(await self.read_varint(reader))
+                body = await reader.readexactly(await self.read_length(reader))
                 kind = first >> 4
                 if kind == 1:  # CONNECT
                     writer.write(bytes([0x20, 3, 0, 0, 0]))  # accepted, no properties
                 elif kind == 8:  # SUBSCRIBE
-                    at = self.skip_properties(body, 2)
-                    codes = bytearray()
-                    while at < len(body):
-                        size = int.from_bytes(body[at : at + 2], "big")
-                        self.subscribers[writer].append(body[at + 2 : at + 2 + size].decode())
-                        at += 2 + size + 1
-                        codes.append(0)
-                    writer.write(
-                        bytes([0x90])
-                        + self.varint(3 + len(codes))
-                        + body[:2]
-                        + b"\x00"
-                        + bytes(codes)
-                    )
+                    topics = list(self.topic_filters(body, option_bytes=1))
+                    self.subscribers[writer] += topics
+                    writer.write(self.ack(0x90, body, topics))
                 elif kind == 10:  # UNSUBSCRIBE
-                    at = self.skip_properties(body, 2)
-                    codes = bytearray()
-                    while at < len(body):
-                        size = int.from_bytes(body[at : at + 2], "big")
-                        topic = body[at + 2 : at + 2 + size].decode()
-                        if topic in self.subscribers[writer]:
-                            self.subscribers[writer].remove(topic)
-                        at += 2 + size
-                        codes.append(0)
-                    writer.write(
-                        bytes([0xB0])
-                        + self.varint(3 + len(codes))
-                        + body[:2]
-                        + b"\x00"
-                        + bytes(codes)
-                    )
+                    topics = list(self.topic_filters(body, option_bytes=0))
+                    keep = [topic for topic in self.subscribers[writer] if topic not in topics]
+                    self.subscribers[writer] = keep
+                    writer.write(self.ack(0xB0, body, topics))
                 elif kind == 3:  # PUBLISH
                     size = int.from_bytes(body[:2], "big")
                     topic = body[2 : 2 + size].decode()
@@ -138,12 +115,11 @@ class Broker:
                     if qos:
                         writer.write(bytes([0x40, 2]) + body[at : at + 2])
                         at += 2
-                    payload = body[self.skip_properties(body, at) :]
-                    out = topic.encode()
-                    packet = len(out).to_bytes(2, "big") + out + b"\x00" + payload
+                    payload = body[self.after_properties(body, at) :]
+                    forwarded = self.packet(0x30, body[: 2 + size] + b"\x00" + payload)
                     for other, filters in self.subscribers.items():
-                        if any(self.matches(f, topic) for f in filters):
-                            other.write(bytes([0x30]) + self.varint(len(packet)) + packet)
+                        if any(topic_matches_sub(f, topic) for f in filters):
+                            other.write(forwarded)
                 elif kind == 12:  # PINGREQ
                     writer.write(bytes([0xD0, 0]))
                 elif kind == 14:  # DISCONNECT
@@ -162,7 +138,6 @@ class Cloud:
     def __init__(self, mqtt_port):
         self.mqtt_port = mqtt_port
         self.codes_requested = []
-        self.unknown_requests = []
 
     async def start(self):
         app = web.Application()
@@ -171,7 +146,6 @@ class Cloud:
         app.router.add_get("/api/v1/getHomeDetail", self.home_detail)
         for path in ("/user/homes/{id}", "/v2/user/homes/{id}", "/v3/user/homes/{id}"):
             app.router.add_get(path, self.homes)
-        app.router.add_route("*", "/{tail:.*}", self.unknown)
         self.runner = web.AppRunner(app)
         await self.runner.setup()
         site = web.TCPSite(self.runner, "127.0.0.1", 0)
@@ -188,13 +162,8 @@ class Cloud:
     async def login(self, request):
         if request.query["verifycode"] != EMAIL_CODE:
             return web.json_response({"code": 2018, "msg": "invalid code", "data": None})
-        rriot = RRiot(
-            u=USER.u,
-            s=USER.s,
-            h=USER.h,
-            k=USER.k,
-            r=Reference(r="US", a=self.url, l=self.url, m=f"tcp://127.0.0.1:{self.mqtt_port}"),
-        )
+        where = Reference(r="US", a=self.url, l=self.url, m=f"tcp://127.0.0.1:{self.mqtt_port}")
+        rriot = RRiot(u=USER.u, s=USER.s, h=USER.h, k=USER.k, r=where)
         user = UserData(
             uid=1,
             tokentype="token_type",
@@ -209,9 +178,8 @@ class Cloud:
         return web.json_response({"code": 200, "msg": "success", "data": user.as_dict()})
 
     async def home_detail(self, request):
-        return web.json_response(
-            {"code": 200, "msg": "success", "data": {"rrHomeId": 1, "id": 1, "name": "Home"}}
-        )
+        data = {"rrHomeId": 1, "id": 1, "name": "Home"}
+        return web.json_response({"code": 200, "msg": "success", "data": data})
 
     async def homes(self, request):
         product = HomeDataProduct(
@@ -229,13 +197,24 @@ class Cloud:
             pv="1.0",
         )
         home = HomeData(id=1, name="Home", devices=[device], products=[product])
-        return web.json_response(
-            {"api": None, "code": 200, "success": True, "status": "ok", "result": home.as_dict()}
-        )
+        result = home.as_dict()
+        reply = {"api": None, "code": 200, "success": True, "status": "ok", "result": result}
+        return web.json_response(reply)
 
-    async def unknown(self, request):
-        self.unknown_requests.append(f"{request.method} {request.path_qs}")
-        return web.json_response({"code": 404, "msg": "unknown", "data": None}, status=404)
+
+STATUS_KEYS = (
+    "msg_ver",
+    "state",
+    "battery",
+    "error_code",
+    "in_cleaning",
+    "dock_error_status",
+    "clean_time",
+    "clean_area",
+    "lock_status",
+    "fan_power",
+    "water_box_mode",
+)
 
 
 def fresh_state():
@@ -259,36 +238,38 @@ def fresh_state():
 
 @dataclass
 class Vacuum:
-    """A robot that answers Roborock's encrypted MQTT requests and keeps simple state."""
+    """A robot that answers Roborock's encrypted MQTT requests and keeps simple state.
+
+    A method named `app_pause` is answered by `do_app_pause`. A method without one gets
+    "unknown_method", which is what real robots answer for a method they lack.
+    """
 
     broker_port: int
     state: dict = field(default_factory=fresh_state)
     requests: list = field(default_factory=list)  # (method, params) of every request, in order
-
-    def user_topic(self):
-        hashed = md5hex(USER.u + ":" + USER.k)[2:10]
-        return f"{USER.u}/{hashed}/{DUID}"
+    subscribed: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def start(self):
         self.task = asyncio.create_task(self.run())
-        await asyncio.sleep(0)
+        await asyncio.wait_for(self.subscribed.wait(), 10)
 
     async def stop(self):
         self.task.cancel()
 
     async def run(self):
         decode, encode = create_mqtt_decoder(LOCAL_KEY), create_mqtt_encoder(LOCAL_KEY)
-        async with aiomqtt.Client(
-            "127.0.0.1", self.broker_port, protocol=aiomqtt.ProtocolVersion.V5
-        ) as client:
-            await client.subscribe(f"rr/m/i/{self.user_topic()}")
+        topic = f"{USER.u}/{create_mqtt_params(USER).username}/{DUID}"
+        protocol = aiomqtt.ProtocolVersion.V5
+        async with aiomqtt.Client("127.0.0.1", self.broker_port, protocol=protocol) as client:
+            await client.subscribe(f"rr/m/i/{topic}")
+            self.subscribed.set()
             async for message in client.messages:
                 for incoming in decode(message.payload):
                     request = json.loads(json.loads(incoming.payload)["dps"]["101"])
-                    self.requests.append((request["method"], request.get("params")))
-                    reply = self.answer(request["method"], request.get("params"))
-                    inner = {"id": request["id"], **reply}
-                    payload = {"dps": {"102": json.dumps(inner)}, "t": int(time.time())}
+                    method, params = request["method"], request.get("params")
+                    self.requests.append((method, params))
+                    reply = {"id": request["id"], "result": self.answer(method, params)}
+                    payload = {"dps": {"102": json.dumps(reply)}, "t": int(time.time())}
                     outgoing = RoborockMessage(
                         protocol=RoborockMessageProtocol.RPC_RESPONSE,
                         payload=json.dumps(payload).encode(),
@@ -296,121 +277,104 @@ class Vacuum:
                         seq=incoming.seq,
                         timestamp=int(time.time()),
                     )
-                    await client.publish(f"rr/m/o/{self.user_topic()}", encode(outgoing))
+                    await client.publish(f"rr/m/o/{topic}", encode(outgoing))
 
     def answer(self, method, params):
-        s = self.state
-        match method:
-            case "get_status":
-                return {
-                    "result": [
-                        {
-                            k: s[k]
-                            for k in (
-                                "msg_ver",
-                                "state",
-                                "battery",
-                                "error_code",
-                                "in_cleaning",
-                                "dock_error_status",
-                                "clean_time",
-                                "clean_area",
-                                "lock_status",
-                                "fan_power",
-                                "water_box_mode",
-                            )
-                        }
-                    ]
-                }
-            case "get_network_info":
-                return {
-                    "result": {
-                        "ip": "127.0.0.1",
-                        "ssid": "fake-wifi",
-                        "mac": "aa:bb:cc:dd:ee:ff",
-                        "bssid": "aa:bb:cc:dd:ee:ff",
-                        "rssi": -50,
-                    }
-                }
-            case "app_get_init_status":
-                return {
-                    "result": [
-                        {
-                            "local_info": {
-                                "location": "us",
-                                "bom": "A.03.0069",
-                                "featureset": 1,
-                                "language": "en",
-                                "name": "fake",
-                            },
-                            "feature_info": [111, 112],
-                            "new_feature_info": 0,
-                            "new_feature_info_str": "0000000000002000",
-                            "new_feature_info_2": 8192,
-                        }
-                    ]
-                }
-            case "get_sound_volume":
-                return {"result": [s["volume"]]}
-            case "change_sound_volume":
-                s["volume"] = params[0]
-                return {"result": ["ok"]}
-            case "get_child_lock_status":
-                return {"result": [{"lock_status": s["lock_status"]}]}
-            case "set_child_lock_status":
-                s["lock_status"] = params["lock_status"]
-                return {"result": ["ok"]}
-            case "get_led_status":
-                return {"result": [s["led"]]}
-            case "set_led_status":
-                s["led"] = params[0]
-                return {"result": ["ok"]}
-            case "get_dnd_timer":
-                return {
-                    "result": [
-                        {
-                            "start_hour": s["dnd"][0],
-                            "start_minute": s["dnd"][1],
-                            "end_hour": s["dnd"][2],
-                            "end_minute": s["dnd"][3],
-                            "enabled": 1,
-                        }
-                    ]
-                }
-            case "set_dnd_timer":
-                s["dnd"] = params
-                return {"result": ["ok"]}
-            case "get_room_mapping":
-                return {"result": [[1, "100", 1], [2, "200", 15]]}
-            case (
-                "find_me"
-                | "app_charge"
-                | "app_stop"
-                | "app_pause"
-                | "app_start"
-                | "app_segment_clean"
-                | "resume_segment_clean"
-                | "resume_zoned_clean"
-                | "app_set_dryer_status"
-                | "resolve_error"
-            ):
-                self.act(method, params)
-                return {"result": ["ok"]}
-        return {"result": "unknown_method"}  # what real robots answer for a method they lack
+        handler = getattr(self, f"do_{method}", None)
+        return handler(params) if handler else "unknown_method"
 
-    def act(self, method, params):
-        s = self.state
-        match method:
-            case "app_start" | "app_segment_clean" | "resume_segment_clean" | "resume_zoned_clean":
-                s.update(state=5, error_code=0)
-            case "app_pause":
-                s["state"] = 10
-            case "app_stop":
-                s["state"] = 3
-            case "app_charge":
-                s["state"] = 8
-            case "resolve_error":
-                s["error_code"] = 0
+    def update(self, **changes):
+        self.state.update(changes)
+        return ["ok"]
+
+    def do_get_status(self, params):
+        return [{key: self.state[key] for key in STATUS_KEYS}]
+
+    def do_get_network_info(self, params):
+        return {
+            "ip": "127.0.0.1",
+            "ssid": "fake-wifi",
+            "mac": "aa:bb:cc:dd:ee:ff",
+            "bssid": "aa:bb:cc:dd:ee:ff",
+            "rssi": -50,
+        }
+
+    def do_app_get_init_status(self, params):
+        local_info = {
+            "location": "us",
+            "bom": "A.03.0069",
+            "featureset": 1,
+            "language": "en",
+            "name": "fake",
+        }
+        return [
+            {
+                "local_info": local_info,
+                "feature_info": [111, 112],
+                "new_feature_info": 0,
+                "new_feature_info_str": "0000000000002000",
+                "new_feature_info_2": 8192,
+            }
+        ]
+
+    def do_get_sound_volume(self, params):
+        return [self.state["volume"]]
+
+    def do_change_sound_volume(self, params):
+        return self.update(volume=params[0])
+
+    def do_get_child_lock_status(self, params):
+        return [{"lock_status": self.state["lock_status"]}]
+
+    def do_set_child_lock_status(self, params):
+        return self.update(lock_status=params["lock_status"])
+
+    def do_get_led_status(self, params):
+        return [self.state["led"]]
+
+    def do_set_led_status(self, params):
+        return self.update(led=params[0])
+
+    def do_get_dnd_timer(self, params):
+        start_hour, start_minute, end_hour, end_minute = self.state["dnd"]
+        return [
+            {
+                "start_hour": start_hour,
+                "start_minute": start_minute,
+                "end_hour": end_hour,
+                "end_minute": end_minute,
+                "enabled": 1,
+            }
+        ]
+
+    def do_set_dnd_timer(self, params):
+        return self.update(dnd=params)
+
+    def do_get_room_mapping(self, params):
+        return [[1, "100", 1], [2, "200", 15]]
+
+    def do_find_me(self, params):
+        return self.update()
+
+    def do_app_set_dryer_status(self, params):
+        return self.update()
+
+    def do_app_charge(self, params):
+        return self.update(state=8)
+
+    def do_app_stop(self, params):
+        return self.update(state=3)
+
+    def do_app_pause(self, params):
+        return self.update(state=10)
+
+    def do_resolve_error(self, params):
+        return self.update(error_code=0)
+
+    def do_app_start(self, params):
+        return self.update(state=5, error_code=0)
+
+    do_app_segment_clean = do_resume_segment_clean = do_resume_zoned_clean = do_app_start
 
 
 class World:
