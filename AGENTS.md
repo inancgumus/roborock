@@ -26,11 +26,12 @@ Commands that read them must not echo them.
 
 ## Tests
 
-Run `./tests/test_roborock.py` before every commit.
+Run `./tests/test_scripts.py` before every commit.
 
 - Write integration tests only. No unit tests and no mocks.
-- Run the real server and the real commands against the fake servers in `tests/fakes.py`.
-- Add a test with every change in behavior, in the same commit.
+- Each test is a script in `tests/testdata/scripts`. It runs the real server and commands and checks their output. `tests/testscript.py` lists the steps a script can use.
+- The fake servers in `tests/fakes.py` listen on real sockets. Teach them a command only when a script needs it.
+- Add a script, or extend one, with every change in behavior, in the same commit.
 
 ## Commits
 
