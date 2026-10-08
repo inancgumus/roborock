@@ -292,7 +292,7 @@ def params(cmd, values):
 
 
 def help_text():
-    lines = [__doc__, "Other commands (add -h after one to see what it needs):"]
+    lines = [__doc__, "Other commands:"]
     bold, plain = ("\033[1m", "\033[0m") if sys.stdout.isatty() else ("", "")
     for group, cmds in GROUPS.items():
         lines.append(f"\n  {bold}{group}{plain}")
