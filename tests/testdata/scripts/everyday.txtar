@@ -21,7 +21,3 @@ vacuum set in_cleaning 3
 exec roborock resume
 vacuum await state 5
 vacuum sent resume_segment_clean '[]'
-
--- login.txt --
-me@example.com
-123456

@@ -22,7 +22,3 @@ stdout 'Uninstalled'
 [darwin] grep '^launchctl bootout gui/' service.log
 [linux] ! exists $HOME/.config/systemd/user/roborock.service
 [linux] grep '^systemctl --user disable --now roborock\.service' service.log
-
--- login.txt --
-me@example.com
-123456

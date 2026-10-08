@@ -44,7 +44,3 @@ vacuum await error_code 2
 exec roborock config set bumper on
 vacuum await state 5
 vacuum sent resolve_error '{"error_code": 2}'
-
--- login.txt --
-me@example.com
-123456

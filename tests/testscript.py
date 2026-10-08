@@ -31,7 +31,7 @@ import threading
 import time
 from pathlib import Path
 
-from fakes import World
+from fakes import EMAIL_CODE, World
 
 HERE = Path(__file__).resolve().parent
 ROBORROCK = HERE.parent / "roborock.py"
@@ -41,34 +41,35 @@ class Failure(AssertionError):
     pass
 
 
+def expand(line, at, env):
+    """The text and length of the $VARIABLE that starts at `at`, or a plain dollar sign."""
+    name = re.match(r"\$(\w+)", line[at:])
+    return (env.get(name.group(1), ""), len(name.group(0))) if name else ("$", 1)
+
+
 def split(line, env):
     """Split a line into words. Single quotes keep text as is, other text expands $VARIABLES."""
     words, word, quote, started = [], "", None, False
     i = 0
     while i < len(line):
         char = line[i]
-        if quote:
-            if char == quote:
-                quote = None
-            elif char == "$" and quote == '"':
-                name = re.match(r"\$(\w+)", line[i:])
-                word += env.get(name.group(1), "") if name else char
-                i += len(name.group(0)) - 1 if name else 0
-            else:
-                word += char
+        size = 1
+        if quote and char == quote:
+            quote = None
+        elif char == "$" and quote != "'":
+            text, size = expand(line, i, env)
+            word += text
+        elif quote:
+            word += char
         elif char in "'\"":
             quote, started = char, True
         elif char.isspace():
             if started or word:
                 words.append(word)
             word, started = "", False
-        elif char == "$":
-            name = re.match(r"\$(\w+)", line[i:])
-            word += env.get(name.group(1), "") if name else char
-            i += len(name.group(0)) - 1 if name else 0
         else:
             word += char
-        i += 1
+        i += size
     if quote:
         raise Failure(f"unterminated quote in: {line}")
     if started or word:
@@ -135,6 +136,7 @@ class Script:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
         (self.work / "roborock").symlink_to(ROBORROCK)
+        # Nothing from the real environment may leak in: the real login, port or folders
         self.env = {
             key: value
             for key, value in os.environ.items()
@@ -155,6 +157,8 @@ class Script:
 
     def run(self):
         lines, files = parse(self.path.read_text())
+        # A script can start a server with `stdin login.txt`, and can override the file
+        files = {"login.txt": f"me@example.com\n{EMAIL_CODE}\n", **files}
         for name, content in files.items():
             (self.work / name).write_text(content)
         try:
@@ -190,7 +194,12 @@ class Script:
             negate = True
             words = words[1:]
         name, args = words[0], words[1:]
-        handler = getattr(self, f"cmd_{name}", None)
+        # `vacuum set` finds cmd_vacuum_set, and `exec` finds cmd_exec
+        handler = getattr(self, f"cmd_{name}_{args[0]}", None) if args else None
+        if handler:
+            args = args[1:]
+        else:
+            handler = getattr(self, f"cmd_{name}", None)
         if handler is None:
             raise Failure(f"unknown command {name!r}")
         handler(negate, args)
@@ -226,26 +235,24 @@ class Script:
     def cmd_stdin(self, negate, args):
         self.stdin = open(self.work / args[0])
 
+    def matches(self, pattern, text):
+        return re.search(pattern, text, re.M)
+
     def cmd_stdout(self, negate, args):
-        self.check(
-            negate, re.search(args[0], self.stdout, re.M), f"stdout does not match {args[0]!r}"
-        )
+        self.check(negate, self.matches(args[0], self.stdout), f"stdout does not match {args[0]!r}")
 
     def cmd_stderr(self, negate, args):
-        self.check(
-            negate, re.search(args[0], self.stderr, re.M), f"stderr does not match {args[0]!r}"
-        )
+        self.check(negate, self.matches(args[0], self.stderr), f"stderr does not match {args[0]!r}")
 
     def cmd_await(self, negate, args):
         process = self.background[-1]
-        self.wait_for(
-            lambda: re.search(args[0], process.text, re.M) or process.process.poll() is not None
-        )
-        self.check(
-            negate,
-            re.search(args[0], process.text, re.M),
-            f"the background program did not print {args[0]!r}",
-        )
+
+        def printed_or_exited():
+            return self.matches(args[0], process.text) or process.process.poll() is not None
+
+        self.wait_for(printed_or_exited)
+        found = self.matches(args[0], process.text)
+        self.check(negate, found, f"the background program did not print {args[0]!r}")
 
     def cmd_kill(self, negate, args):
         process = self.background.pop()
@@ -253,19 +260,11 @@ class Script:
         self.stdout = process.text
 
     def cmd_exists(self, negate, args):
-        self.check(
-            negate,
-            (self.work / args[0]).exists() or Path(args[0]).exists(),
-            f"{args[0]} does not exist",
-        )
+        self.check(negate, (self.work / args[0]).exists(), f"{args[0]} does not exist")
 
     def cmd_grep(self, negate, args):
-        text = (
-            Path(args[1]).read_text()
-            if Path(args[1]).is_absolute()
-            else (self.work / args[1]).read_text()
-        )
-        self.check(negate, re.search(args[0], text, re.M), f"{args[1]} does not match {args[0]!r}")
+        text = (self.work / args[1]).read_text()
+        self.check(negate, self.matches(args[0], text), f"{args[1]} does not match {args[0]!r}")
 
     def cmd_sleep(self, negate, args):
         time.sleep(float(args[0]))
@@ -279,34 +278,25 @@ class Script:
             time.sleep(0.1)
         return False
 
-    def cmd_vacuum(self, negate, args):
-        action, rest = args[0], args[1:]
-        vacuum = self.world.vacuum
-        if action == "set":
-            vacuum.state[rest[0]] = json.loads(rest[1])
-        elif action == "await":
-            ok = self.wait_for(lambda: vacuum.state[rest[0]] == json.loads(rest[1]))
-            self.check(negate, ok, f"{rest[0]} is {vacuum.state[rest[0]]!r}, not {rest[1]}")
-        elif action == "sent":
-            want = [json.loads(rest[1])] if len(rest) > 1 else None
-            seen = [
-                params
-                for method, params in vacuum.requests
-                if method == rest[0] and want in (None, [params])
-            ]
-            self.check(
-                negate,
-                seen,
-                f"the robot did not get {rest[0]} {rest[1:]}; it got {vacuum.requests}",
-            )
-        elif action == "clear":
-            vacuum.requests.clear()
-        else:
-            raise Failure(f"unknown vacuum action {action!r}")
+    def cmd_vacuum_set(self, negate, args):
+        key, value = args
+        self.world.vacuum.state[key] = json.loads(value)
 
-    def cmd_cloud(self, negate, args):
-        self.check(
-            negate,
-            args[1] in self.world.cloud.codes_requested,
-            f"the cloud was not asked to email {args[1]}",
-        )
+    def cmd_vacuum_await(self, negate, args):
+        key, value = args
+        state = self.world.vacuum.state
+        reached = self.wait_for(lambda: state[key] == json.loads(value))
+        self.check(negate, reached, f"{key} is {state[key]!r}, not {value}")
+
+    def cmd_vacuum_sent(self, negate, args):
+        method, params = args[0], [json.loads(arg) for arg in args[1:]]
+        requests = self.world.vacuum.requests
+        seen = [p for m, p in requests if m == method and (not params or params == [p])]
+        self.check(negate, seen, f"the robot did not get {method} {args[1:]}; it got {requests}")
+
+    def cmd_vacuum_clear(self, negate, args):
+        self.world.vacuum.requests.clear()
+
+    def cmd_cloud_asked(self, negate, args):
+        asked = self.world.cloud.codes_requested
+        self.check(negate, args[0] in asked, f"the cloud was not asked to email {args[0]}")

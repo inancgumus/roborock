@@ -26,7 +26,3 @@ await 'Ready!'
 exec roborock
 stdout '^Commands:'
 stdout '^  Everyday'
-
--- login.txt --
-me@example.com
-123456
