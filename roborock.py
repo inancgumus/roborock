@@ -15,8 +15,6 @@ Usage:
     ./roborock.py stop                   Stop cleaning
     ./roborock.py charge                 Go back to the dock
     ./roborock.py <command>              Send any other command below
-    ./roborock.py -h                     Show this help
-    ./roborock.py <command> -h           Show what a command needs
 """
 import argparse
 import asyncio
