@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["python-roborock", "platformdirs", "keyring"]
+# dependencies = ["python-roborock", "keyring"]
 # ///
 """Control a Roborock vacuum.
 
@@ -20,9 +20,10 @@ Usage:
 import argparse
 import asyncio
 import contextlib
+import hmac
 import json
 import logging
-import os
+import secrets
 import sys
 import time
 from collections.abc import Callable
@@ -33,7 +34,6 @@ from typing import NamedTuple
 sys.path = [p for p in sys.path if p != str(Path(__file__).resolve().parent)]
 
 import keyring
-from platformdirs import user_runtime_dir
 from roborock.data import UserData
 from roborock.data.v1.v1_code_mappings import RoborockErrorCode, RoborockStateCode
 from roborock.devices.device_manager import UserParams, create_device_manager
@@ -41,7 +41,7 @@ from roborock.devices.traits.v1.consumeable import ConsumableAttribute
 from roborock.roborock_typing import RoborockCommand
 from roborock.web_api import RoborockApiClient
 
-SOCKET_FILE = Path(user_runtime_dir("roborock")) / "server.sock"
+HOST, PORT = "127.0.0.1", 47651  # the server only listens on this computer
 
 
 class Arg(NamedTuple):
@@ -354,8 +354,8 @@ def build_parser():
 
 async def serve():
     try:
-        _, writer = await asyncio.open_unix_connection(SOCKET_FILE)
-    except (FileNotFoundError, ConnectionRefusedError):
+        _, writer = await asyncio.open_connection(HOST, PORT)
+    except ConnectionRefusedError:
         pass
     else:
         writer.close()
@@ -364,10 +364,13 @@ async def serve():
         await login(input("Roborock email: ").strip())
     async with connect() as vacuum:
         command = vacuum.v1_properties.command
+        secret = secrets.token_hex(16)  # keeps other programs on this computer from sending commands
 
         async def handle(reader, writer):
             try:
                 request = json.loads(await reader.readline())
+                if not hmac.compare_digest(request["secret"], secret):
+                    raise PermissionError("wrong secret")
                 result = await command.send(RoborockCommand(request["command"]), request["params"])
                 reply = {"result": result}
             except Exception as err:
@@ -377,31 +380,29 @@ async def serve():
                 await writer.drain()
             writer.close()
 
-        SOCKET_FILE.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        SOCKET_FILE.unlink(missing_ok=True)
-        previous = os.umask(0o177)  # only this user may connect
         try:
-            server = await asyncio.start_unix_server(handle, SOCKET_FILE)
-        finally:
-            os.umask(previous)
+            server = await asyncio.start_server(handle, HOST, PORT)
+        except OSError as err:
+            sys.exit(f"Cannot listen on port {PORT}: {err}")
+        keyring.set_password("roborock", "server", secret)
         print(
             f"Serving {vacuum.name}. Leave this running.\n"
             "In another terminal, run ./roborock.py <command>, like ./roborock.py find.\n"
             "Commands find this server on their own. ./roborock.py -h lists them."
         )
-        try:
-            async with server:
-                await server.serve_forever()
-        finally:
-            SOCKET_FILE.unlink(missing_ok=True)
+        async with server:
+            await server.serve_forever()
 
 
 async def request(command, params):
+    secret = keyring.get_password("roborock", "server")
     try:
-        reader, writer = await asyncio.open_unix_connection(SOCKET_FILE)
-    except (FileNotFoundError, ConnectionRefusedError):
+        if secret is None:
+            raise ConnectionRefusedError
+        reader, writer = await asyncio.open_connection(HOST, PORT)
+    except ConnectionRefusedError:
         sys.exit("No server is running. Start one in another terminal with ./roborock.py, then try again.")
-    writer.write(json.dumps({"command": command.value, "params": params}).encode() + b"\n")
+    writer.write(json.dumps({"secret": secret, "command": command.value, "params": params}).encode() + b"\n")
     reply = json.loads(await reader.readline())
     writer.close()
     if "error" in reply:
