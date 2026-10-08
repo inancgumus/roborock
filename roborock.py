@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["python-roborock", "keyring"]
+# dependencies = ["python-roborock", "keyring", "platformdirs"]
 # ///
 """Control a Roborock vacuum.
 
@@ -16,6 +16,7 @@ Usage:
     ./roborock.py stop                   Stop cleaning
     ./roborock.py charge                 Go back to the dock
     ./roborock.py <command>              Send any other command below
+    ./roborock.py -v ...                 Also show the log, which is kept in a file otherwise
 """
 import argparse
 import asyncio
@@ -23,6 +24,7 @@ import contextlib
 import hmac
 import json
 import logging
+import logging.handlers
 import secrets
 import sys
 import time
@@ -34,6 +36,7 @@ from typing import NamedTuple
 sys.path = [p for p in sys.path if p != str(Path(__file__).resolve().parent)]
 
 import keyring
+from platformdirs import user_log_dir
 from roborock.data import UserData
 from roborock.data.v1.v1_code_mappings import RoborockErrorCode, RoborockStateCode
 from roborock.devices.device_manager import UserParams, create_device_manager
@@ -258,12 +261,29 @@ RESUME_COMMANDS = {
 }
 
 
+def bold(text):
+    return f"\033[1m{text}\033[0m" if sys.stdout.isatty() else text
+
+
+def say(text):
+    print(bold(text), flush=True)
+
+
+def setup_logging(verbose):
+    log_file = Path(user_log_dir("roborock")) / "roborock.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    handlers = [logging.handlers.RotatingFileHandler(log_file, maxBytes=1_000_000, backupCount=3)]
+    if verbose:
+        handlers.append(logging.StreamHandler())
+    logging.basicConfig(level=logging.INFO, handlers=handlers, format="%(asctime)s %(name)s %(message)s")
+
+
 async def login(email):
     client = RoborockApiClient(email)
     await client.request_code()
-    user_data = await client.code_login(input("Code from email: ").strip())
+    user_data = await client.code_login(input(bold("Code from email: ")).strip())
     keyring.set_password("roborock", "session", json.dumps({"email": email, "user_data": user_data.as_dict()}))
-    print("Logged in.")
+    say("Logged in.")
 
 
 async def resume(status=None):
@@ -277,10 +297,10 @@ async def resume_if_stuck():
     [status] = await request(RoborockCommand.GET_STATUS, None)
     if status["error_code"] != RoborockErrorCode.bumper_stuck:
         return
-    logging.warning("Bumper stuck, continuing")
     await request(RoborockCommand.RESOLVE_ERROR, {"error_code": status["error_code"]})
     if status["state"] in (RoborockStateCode.paused, RoborockStateCode.error):
         await resume(status)
+    say(f"{time.strftime('%H:%M:%S')} Bumper stuck. Resumed the clean.")
 
 
 @contextlib.asynccontextmanager
@@ -295,12 +315,13 @@ async def connect():
 
 
 async def run():
-    logging.info("Watching for bumper stuck.")
+    say("Watching for bumper stuck. Press Ctrl-C to stop.")
     while True:
         try:
             await resume_if_stuck()
         except RuntimeError:
-            logging.exception("Failed, retrying in 1s")
+            logging.exception("Could not resume")
+            say("Something went wrong. Trying again in a second. The log has the details.")
         await asyncio.sleep(1)
 
 
@@ -314,9 +335,8 @@ def params(cmd, values):
 
 
 def area_lines(area):
-    bold, plain = ("\033[1m", "\033[0m") if sys.stdout.isatty() else ("", "")
     title, cmds = AREAS[area]
-    lines = [f"\n  {bold}{title}{plain}"]
+    lines = [f"\n  {bold(title)}"]
     for cmd in cmds:
         usage = " ".join([area, cmd.verb, *(f"<{a.name}>" if a.default is None else f"[{a.name}]" for a in cmd.args)])
         lines.append(f"    {usage:<44} {cmd.text}")
@@ -362,7 +382,7 @@ async def serve():
         print(help_text())
         return
     if keyring.get_password("roborock", "session") is None:
-        await login(input("Roborock email: ").strip())
+        await login(input(bold("Roborock email: ")).strip())
     async with connect() as vacuum:
         command = vacuum.v1_properties.command
         secret = secrets.token_hex(16)  # keeps other programs on this computer from sending commands
@@ -374,7 +394,9 @@ async def serve():
                     raise PermissionError("wrong secret")
                 result = await command.send(RoborockCommand(request["command"]), request["params"])
                 reply = {"result": result}
+                logging.info("Ran %s", request["command"])
             except Exception as err:
+                logging.warning("Command failed: %s", err)
                 reply = {"error": f"{type(err).__name__}: {err}"}
             with contextlib.suppress(ConnectionError):  # the client left before the reply
                 writer.write(json.dumps(reply, default=str).encode() + b"\n")
@@ -386,11 +408,8 @@ async def serve():
         except OSError as err:
             sys.exit(f"Cannot listen on port {PORT}: {err}")
         keyring.set_password("roborock", "server", secret)
-        print(
-            f"Serving {vacuum.name}. Leave this running.\n"
-            "In another terminal, run ./roborock.py <command>, like ./roborock.py find.\n"
-            "Commands find this server on their own. ./roborock.py -h lists them."
-        )
+        say(f"Serving {vacuum.name}. Leave this running.")
+        say("In another terminal, run ./roborock.py <command>, like ./roborock.py find.")
         async with server:
             await server.serve_forever()
 
@@ -419,19 +438,19 @@ async def send(command, params):
 
 
 def main():
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
-    if sys.argv[1:] == []:
-        asyncio.run(serve())
-        return
-    if sys.argv[1:] in (["-h"], ["--help"]):
+    argv = [arg for arg in sys.argv[1:] if arg not in ("-v", "--verbose")]
+    setup_logging(verbose=len(argv) != len(sys.argv[1:]))
+    if argv in (["-h"], ["--help"]):
         print(help_text())
         return
-    args = build_parser().parse_args()
-    if args.area in AREAS and not args.verb:
-        print("\n".join(area_lines(args.area)))
-        return
     try:
-        if args.area == "nobumperstuck":
+        if not argv:
+            asyncio.run(serve())
+            return
+        args = build_parser().parse_args(argv)
+        if args.area in AREAS and not args.verb:
+            print("\n".join(area_lines(args.area)))
+        elif args.area == "nobumperstuck":
             asyncio.run(run())
         elif args.area == "resume":
             asyncio.run(resume())
