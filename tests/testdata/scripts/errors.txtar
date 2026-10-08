@@ -1,0 +1,34 @@
+# Without a server, commands say how to start one
+! exec roborock status show
+stderr 'No server is running'
+stderr 'Start one in another terminal with \./roborock\.py'
+
+stdin login.txt
+exec roborock &
+await 'Ready!'
+vacuum clear
+
+# Bad input never reaches the robot
+! exec roborock volume set 500
+stderr 'use a number from 0 to 100'
+! vacuum sent change_sound_volume
+! exec roborock quiet set 25:00 08:00
+stderr 'use HH:MM'
+! exec roborock lights set maybe
+stderr 'use on or off'
+! exec roborock clean rooms one
+stderr 'use numbers separated by commas'
+
+# Unknown commands and areas
+! exec roborock nope
+stderr "unknown command 'nope'"
+! exec roborock clean nope
+stderr "unknown command 'nope'"
+
+# A method this robot lacks is reported as an error
+! exec roborock schedules list
+stderr 'not recognized by the device'
+
+-- login.txt --
+me@example.com
+123456

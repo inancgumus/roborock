@@ -1,0 +1,28 @@
+# Installing needs a login the server has saved
+! exec roborock install
+stderr 'Log in first'
+
+stdin login.txt
+exec roborock &
+await 'Ready!'
+
+exec roborock install
+stdout 'Installed\. The server starts when you log in'
+[darwin] exists $HOME/Library/LaunchAgents/io.github.inancgumus.roborock.plist
+[darwin] grep 'RunAtLoad' $HOME/Library/LaunchAgents/io.github.inancgumus.roborock.plist
+[darwin] grep 'run' $HOME/Library/LaunchAgents/io.github.inancgumus.roborock.plist
+[darwin] grep '^launchctl bootstrap gui/' service.log
+[linux] exists $HOME/.config/systemd/user/roborock.service
+[linux] grep 'ExecStart=.* run --script ' $HOME/.config/systemd/user/roborock.service
+[linux] grep '^systemctl --user enable --now roborock\.service' service.log
+
+exec roborock uninstall
+stdout 'Uninstalled'
+[darwin] ! exists $HOME/Library/LaunchAgents/io.github.inancgumus.roborock.plist
+[darwin] grep '^launchctl bootout gui/' service.log
+[linux] ! exists $HOME/.config/systemd/user/roborock.service
+[linux] grep '^systemctl --user disable --now roborock\.service' service.log
+
+-- login.txt --
+me@example.com
+123456

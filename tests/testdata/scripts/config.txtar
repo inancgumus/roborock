@@ -1,0 +1,17 @@
+exec roborock config show
+stdout 'bumper +on'
+exec roborock config set bumper off
+stdout 'bumper +off'
+exec roborock config show
+stdout 'bumper +off'
+exec roborock config set bumper on
+stdout 'bumper +on'
+
+exec roborock config
+stdout '^  Settings'
+stdout 'config set <name> <on\|off>'
+
+! exec roborock config set nope on
+stderr 'use one of: bumper'
+! exec roborock config set bumper maybe
+stderr 'use on or off'
