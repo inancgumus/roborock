@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["python-roborock"]
+# dependencies = ["python-roborock", "platformdirs"]
 # ///
 """Control a Roborock vacuum.
 
@@ -32,6 +32,7 @@ from typing import NamedTuple
 # This file is named roborock.py, so its folder would shadow the roborock library
 sys.path = [p for p in sys.path if p != str(Path(__file__).resolve().parent)]
 
+from platformdirs import user_config_dir, user_runtime_dir
 from roborock.data import UserData
 from roborock.data.v1.v1_code_mappings import RoborockErrorCode, RoborockStateCode
 from roborock.devices.device_manager import UserParams, create_device_manager
@@ -39,8 +40,8 @@ from roborock.devices.traits.v1.consumeable import ConsumableAttribute
 from roborock.roborock_typing import RoborockCommand
 from roborock.web_api import RoborockApiClient
 
-SESSION_FILE = Path.home() / ".roborock-autoresume.json"
-SOCKET_FILE = Path.home() / ".roborock-supervisor.sock"
+SESSION_FILE = Path(user_config_dir("roborock")) / "session.json"
+SOCKET_FILE = Path(user_runtime_dir("roborock")) / "server.sock"
 
 
 class Arg(NamedTuple):
@@ -261,6 +262,7 @@ async def login(email):
     client = RoborockApiClient(email)
     await client.request_code()
     user_data = await client.code_login(input("Code from email: ").strip())
+    SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
     SESSION_FILE.write_text(json.dumps({"email": email, "user_data": user_data.as_dict()}))
     SESSION_FILE.chmod(0o600)  # holds account tokens
     print("Logged in.")
@@ -377,6 +379,7 @@ async def serve():
                 await writer.drain()
             writer.close()
 
+        SOCKET_FILE.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         SOCKET_FILE.unlink(missing_ok=True)
         previous = os.umask(0o177)  # only this user may connect
         try:
