@@ -22,6 +22,7 @@ import argparse
 import asyncio
 import contextlib
 import hmac
+import itertools
 import json
 import logging
 import logging.handlers
@@ -269,6 +270,28 @@ def say(text):
     print(bold(text), flush=True)
 
 
+@contextlib.asynccontextmanager
+async def sweeping(text):
+    if not sys.stdout.isatty():
+        say(f"{text}...")
+        yield
+        return
+
+    async def animate():
+        width = 8
+        for step in itertools.count():
+            sweep = step % width
+            print(f"\r\033[K{'  ' * sweep}🧹{'· ' * (width - sweep - 1)} {bold(text)}", end="", flush=True)
+            await asyncio.sleep(0.15)
+
+    task = asyncio.create_task(animate())
+    try:
+        yield
+    finally:
+        task.cancel()
+        print("\r\033[K", end="", flush=True)
+
+
 def setup_logging(verbose):
     log_file = Path(user_log_dir("roborock")) / "roborock.log"
     log_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -307,9 +330,12 @@ async def resume_if_stuck():
 async def connect():
     saved = json.loads(keyring.get_password("roborock", "session"))
     params = UserParams(saved["email"], UserData.from_dict(saved["user_data"]))
-    manager = await create_device_manager(params)
+    async with sweeping("Connecting to your account"):
+        manager = await create_device_manager(params)
     try:
-        yield next(d for d in await manager.get_devices() if d.v1_properties)
+        async with sweeping("Looking for your vacuum"):
+            vacuum = next(d for d in await manager.get_devices() if d.v1_properties)
+        yield vacuum
     finally:
         await manager.close()
 
@@ -408,7 +434,7 @@ async def serve():
         except OSError as err:
             sys.exit(f"Cannot listen on port {PORT}: {err}")
         keyring.set_password("roborock", "server", secret)
-        say(f"Serving {vacuum.name}. Leave this running.")
+        say(f"🎉 Ready! Serving {vacuum.name}. Leave this running.")
         say("In another terminal, run ./roborock.py <command>, like ./roborock.py find.")
         async with server:
             await server.serve_forever()
