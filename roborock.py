@@ -8,7 +8,7 @@
 Usage:
     ./roborock.py                        Start the server, logging in with an emailed code if needed.
                                          Do this first, in its own terminal
-    ./roborock.py nobumperstuck          Resume each time it reports "bumper stuck"
+    ./roborock.py config                 Show and change settings, like resuming on "bumper stuck"
     ./roborock.py find                   Say "I'm over here"
     ./roborock.py start                  Start cleaning
     ./roborock.py pause                  Pause cleaning
@@ -44,7 +44,7 @@ from typing import NamedTuple
 sys.path = [p for p in sys.path if p != str(Path(__file__).resolve().parent)]
 
 import keyring
-from platformdirs import user_log_dir
+from platformdirs import user_config_dir, user_log_dir
 from roborock.data import UserData
 from roborock.data.v1.v1_code_mappings import RoborockErrorCode, RoborockStateCode
 from roborock.devices.device_manager import UserParams, create_device_manager
@@ -52,6 +52,8 @@ from roborock.devices.traits.v1.consumeable import ConsumableAttribute
 from roborock.roborock_typing import RoborockCommand
 from roborock.web_api import RoborockApiClient
 
+CONFIG_FILE = Path(user_config_dir("roborock")) / "config.json"
+SETTINGS = {"bumper": 'Resume the clean when the robot reports "bumper stuck"'}  # all on by default
 SERVICE = "io.github.inancgumus.roborock"
 HOST, PORT = "127.0.0.1", 47651  # the server only listens on this computer
 
@@ -327,21 +329,44 @@ async def login(email):
     say("Logged in.")
 
 
-async def resume(status=None):
+async def resume(call, status=None):
     if status is None:
-        [status] = await request(RoborockCommand.GET_STATUS, None)
+        [status] = await call(RoborockCommand.GET_STATUS, None)
     mode = int(status["in_cleaning"] or 0)
-    await request(RESUME_COMMANDS.get(mode, RoborockCommand.APP_START), None)
+    await call(RESUME_COMMANDS.get(mode, RoborockCommand.APP_START), None)
 
 
-async def resume_if_stuck():
-    [status] = await request(RoborockCommand.GET_STATUS, None)
+async def resume_if_stuck(call):
+    [status] = await call(RoborockCommand.GET_STATUS, None)
     if status["error_code"] != RoborockErrorCode.bumper_stuck:
         return
-    await request(RoborockCommand.RESOLVE_ERROR, {"error_code": status["error_code"]})
+    await call(RoborockCommand.RESOLVE_ERROR, {"error_code": status["error_code"]})
     if status["state"] in (RoborockStateCode.paused, RoborockStateCode.error):
-        await resume(status)
+        await resume(call, status)
     say(f"{time.strftime('%H:%M:%S')} Bumper stuck. Resumed the clean.")
+
+
+def load_config():
+    try:
+        saved = json.loads(CONFIG_FILE.read_text())
+    except FileNotFoundError:
+        saved = {}
+    return {name: saved.get(name, True) for name in SETTINGS}
+
+
+async def watch(call):
+    failing = False
+    while True:
+        try:
+            if load_config()["bumper"]:
+                await resume_if_stuck(call)
+            failing = False
+        except Exception:
+            logging.exception("Could not check the robot")
+            if not failing:
+                error("Could not check the robot. Still trying. The log has the details.")
+            failing = True
+        await asyncio.sleep(1)
 
 
 @contextlib.asynccontextmanager
@@ -356,17 +381,6 @@ async def connect():
         yield vacuum
     finally:
         await manager.close()
-
-
-async def run():
-    say("Watching for bumper stuck. Press Ctrl-C to stop.")
-    while True:
-        try:
-            await resume_if_stuck()
-        except RuntimeError:
-            logging.exception("Could not resume")
-            error("Something went wrong. Trying again in a second. The log has the details.")
-        await asyncio.sleep(1)
 
 
 def params(cmd, values):
@@ -387,8 +401,17 @@ def area_lines(area):
     return lines
 
 
+def config_lines():
+    names = ", ".join(SETTINGS)
+    return [
+        f"\n  {bold('Settings')}",
+        f"    {'config show':<44} Show the settings",
+        f"    {'config set <name> <on|off>':<44} Change a setting. Names: {names}",
+    ]
+
+
 def help_text():
-    return "\n".join([__doc__, "Other commands:", *(line for area in AREAS for line in area_lines(area))])
+    return "\n".join([__doc__, "Other commands:", *(line for area in AREAS for line in area_lines(area)), *config_lines()])
 
 
 class Parser(argparse.ArgumentParser):
@@ -403,7 +426,12 @@ class Parser(argparse.ArgumentParser):
 def build_parser():
     parser = Parser(prog="./roborock.py", add_help=False)
     areas = parser.add_subparsers(dest="area", metavar="<command>", parser_class=Parser)
-    areas.add_parser("nobumperstuck", description='Resume each time it reports "bumper stuck"')
+    config = areas.add_parser("config", prog="./roborock.py config", description="Settings").add_subparsers(
+        dest="verb", metavar="<command>", parser_class=Parser)
+    config.add_parser("show", prog="./roborock.py config show", description="Show the settings")
+    change = config.add_parser("set", prog="./roborock.py config set", description="Change a setting")
+    change.add_argument("name", type=choice(*SETTINGS), metavar="name", help="One of: " + ", ".join(SETTINGS))
+    change.add_argument("state", type=on_off, metavar="on|off", help="Turn it on or off")
     areas.add_parser("resume", description="Continue a paused clean")
     areas.add_parser("install", description="Start the server whenever you log in")
     areas.add_parser("uninstall", description="Stop starting the server when you log in")
@@ -458,8 +486,14 @@ async def serve():
         keyring.set_password("roborock", "server", secret)
         say(f"🎉 Ready! Serving {vacuum.name}. Leave this running.")
         say("In another terminal, run ./roborock.py <command>, like ./roborock.py find.")
-        async with server:
-            await server.serve_forever()
+        if load_config()["bumper"]:
+            say('It resumes the clean on its own when the robot reports "bumper stuck".')
+        watcher = asyncio.create_task(watch(command.send))
+        try:
+            async with server:
+                await server.serve_forever()
+        finally:
+            watcher.cancel()
 
 
 def service_files():
@@ -533,6 +567,19 @@ async def send(command, params):
         fail(str(err))
 
 
+def configure(args):
+    settings = load_config()
+    if args.verb == "set":
+        settings[args.name] = bool(args.state)
+        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CONFIG_FILE.write_text(json.dumps(settings))
+    elif args.verb is None:
+        print("\n".join(config_lines()))
+        return
+    for name, text in SETTINGS.items():
+        print(f"{name:<8} {'on' if settings[name] else 'off':<4} {text}")
+
+
 def main():
     argv = [arg for arg in sys.argv[1:] if arg not in ("-v", "--verbose")]
     setup_logging(verbose=len(argv) != len(sys.argv[1:]))
@@ -544,16 +591,16 @@ def main():
             asyncio.run(serve())
             return
         args = build_parser().parse_args(argv)
-        if args.area in AREAS and not args.verb:
+        if args.area == "config":
+            configure(args)
+        elif args.area in AREAS and not args.verb:
             print("\n".join(area_lines(args.area)))
         elif args.area == "install":
             install()
         elif args.area == "uninstall":
             uninstall()
-        elif args.area == "nobumperstuck":
-            asyncio.run(run())
         elif args.area == "resume":
-            asyncio.run(resume())
+            asyncio.run(resume(request))
         elif args.area in ALIASES:
             asyncio.run(send(RoborockCommand(ALIASES[args.area][0]), None))
         else:

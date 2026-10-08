@@ -52,16 +52,18 @@ Commands are `<area> <verb>`.
 | `./roborock.py drying start` | Dry the mop |
 | `./roborock.py parts show` | Show how worn the brushes and filter are |
 
-## Bumper stuck
+## Settings
 
 The vacuum sometimes stops with "bumper stuck" even when the bumper is fine.
 
-This clears the error and resumes the clean every time it happens.
+The server clears the error and resumes the clean every time it happens.
 
-It checks every second until you stop it with Ctrl-C:
+Settings are on by default. Turn one off or on again with `config set`:
 
 ```sh
-./roborock.py nobumperstuck
+./roborock.py config show
+./roborock.py config set bumper off
+./roborock.py config set bumper on
 ```
 
 ## Logs
