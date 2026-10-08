@@ -11,7 +11,7 @@ It needs [uv](https://docs.astral.sh/uv/), which installs the dependencies on th
 ./supervisor.py nobumperstuck          # resume after each "bumper stuck"
 ./supervisor.py find                   # say "I'm over here"
 ./supervisor.py start                  # start, pause, stop, or charge
-./supervisor.py list                   # list every other command
+./supervisor.py -h                     # list every command
 ```
 
 The login token is saved in `~/.roborock-autoresume.json`.

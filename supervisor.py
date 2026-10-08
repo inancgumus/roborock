@@ -13,14 +13,15 @@ Usage:
     ./supervisor.py pause                  Pause cleaning
     ./supervisor.py stop                   Stop cleaning
     ./supervisor.py charge                 Go back to the dock
-    ./supervisor.py list                   List every other command
-    ./supervisor.py <command>              Send any command from the list
-"""
+    ./supervisor.py <command>              Send any other command below
+
+Other commands:"""
 import asyncio
 import contextlib
 import json
 import logging
 import sys
+import textwrap
 from pathlib import Path
 
 from roborock.data import UserData
@@ -82,13 +83,18 @@ async def run():
             await asyncio.sleep(1)
 
 
+def short_names():
+    names = {c.value for c in RoborockCommand}
+    return sorted(n.removeprefix("app_") if n.removeprefix("app_") not in names else n for n in names)
+
+
 def to_command(name):
     names = {c.value for c in RoborockCommand}
     name = {"find": "find_me"}.get(name, name)
     if name not in names and f"app_{name}" in names:
         name = f"app_{name}"
     if name not in names:
-        sys.exit(f"Unknown command {name!r}. Run ./supervisor.py list.")
+        sys.exit(f"Unknown command {name!r}. Run ./supervisor.py -h.")
     return RoborockCommand(name)
 
 
@@ -105,12 +111,11 @@ def main():
             asyncio.run(login(args[1]))
         elif args == ["nobumperstuck"]:
             asyncio.run(run())
-        elif args == ["list"]:
-            print("\n".join(sorted(c.value for c in RoborockCommand)))
         elif len(args) == 1 and args[0] not in ("-h", "--help", "help"):
             asyncio.run(send(to_command(args[0])))
         else:
             print(__doc__)
+            print(textwrap.fill("  ".join(short_names()), 80, initial_indent="    ", subsequent_indent="    "))
     except KeyboardInterrupt:
         pass
 
