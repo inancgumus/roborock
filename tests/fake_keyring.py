@@ -1,4 +1,5 @@
-"""A keyring backend that keeps secrets in a file, so the server and the commands share them in tests."""
+"""A keyring backend that keeps secrets in a file the server and commands share."""
+
 import json
 import os
 from pathlib import Path

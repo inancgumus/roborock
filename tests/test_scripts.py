@@ -5,6 +5,7 @@
 # ///
 """Runs every script in testdata/scripts against the real server and commands,
 with fake Roborock servers that listen on real sockets. See testscript.py."""
+
 import sys
 from pathlib import Path
 

@@ -4,6 +4,7 @@ The cloud speaks HTTP, the broker speaks MQTT 5 and the vacuum is an MQTT client
 that answers Roborock's encrypted messages. Nothing is mocked. The real
 roborock.py and the real python-roborock library talk to them over the network.
 """
+
 import asyncio
 import json
 import threading
@@ -12,14 +13,24 @@ from dataclasses import dataclass, field
 
 import aiomqtt
 from aiohttp import web
-from roborock.data import HomeData, HomeDataDevice, HomeDataProduct, Reference, RoborockCategory, RRiot, UserData
+from roborock.data import (
+    HomeData,
+    HomeDataDevice,
+    HomeDataProduct,
+    Reference,
+    RoborockCategory,
+    RRiot,
+    UserData,
+)
 from roborock.protocol import create_mqtt_decoder, create_mqtt_encoder, md5hex
 from roborock.roborock_message import RoborockMessage, RoborockMessageProtocol
 
 EMAIL_CODE = "123456"
 DUID = "fake-duid"
 LOCAL_KEY = "fake_localkey_16b"
-USER = RRiot(u="user123", s="pass123", h="unknown123", k="qiCNieZa", r=Reference(r="US", a="", l="", m=""))
+USER = RRiot(
+    u="user123", s="pass123", h="unknown123", k="qiCNieZa", r=Reference(r="US", a="", l="", m="")
+)
 
 
 class Broker:
@@ -91,31 +102,43 @@ class Broker:
                     at = self.skip_properties(body, 2)
                     codes = bytearray()
                     while at < len(body):
-                        size = int.from_bytes(body[at:at + 2], "big")
-                        self.subscribers[writer].append(body[at + 2:at + 2 + size].decode())
+                        size = int.from_bytes(body[at : at + 2], "big")
+                        self.subscribers[writer].append(body[at + 2 : at + 2 + size].decode())
                         at += 2 + size + 1
                         codes.append(0)
-                    writer.write(bytes([0x90]) + self.varint(3 + len(codes)) + body[:2] + b"\x00" + bytes(codes))
+                    writer.write(
+                        bytes([0x90])
+                        + self.varint(3 + len(codes))
+                        + body[:2]
+                        + b"\x00"
+                        + bytes(codes)
+                    )
                 elif kind == 10:  # UNSUBSCRIBE
                     at = self.skip_properties(body, 2)
                     codes = bytearray()
                     while at < len(body):
-                        size = int.from_bytes(body[at:at + 2], "big")
-                        topic = body[at + 2:at + 2 + size].decode()
+                        size = int.from_bytes(body[at : at + 2], "big")
+                        topic = body[at + 2 : at + 2 + size].decode()
                         if topic in self.subscribers[writer]:
                             self.subscribers[writer].remove(topic)
                         at += 2 + size
                         codes.append(0)
-                    writer.write(bytes([0xB0]) + self.varint(3 + len(codes)) + body[:2] + b"\x00" + bytes(codes))
+                    writer.write(
+                        bytes([0xB0])
+                        + self.varint(3 + len(codes))
+                        + body[:2]
+                        + b"\x00"
+                        + bytes(codes)
+                    )
                 elif kind == 3:  # PUBLISH
                     size = int.from_bytes(body[:2], "big")
-                    topic = body[2:2 + size].decode()
+                    topic = body[2 : 2 + size].decode()
                     at = 2 + size
                     qos = (first >> 1) & 3
                     if qos:
-                        writer.write(bytes([0x40, 2]) + body[at:at + 2])
+                        writer.write(bytes([0x40, 2]) + body[at : at + 2])
                         at += 2
-                    payload = body[self.skip_properties(body, at):]
+                    payload = body[self.skip_properties(body, at) :]
                     out = topic.encode()
                     packet = len(out).to_bytes(2, "big") + out + b"\x00" + payload
                     for other, filters in self.subscribers.items():
@@ -165,23 +188,50 @@ class Cloud:
     async def login(self, request):
         if request.query["verifycode"] != EMAIL_CODE:
             return web.json_response({"code": 2018, "msg": "invalid code", "data": None})
-        rriot = RRiot(u=USER.u, s=USER.s, h=USER.h, k=USER.k,
-                      r=Reference(r="US", a=self.url, l=self.url, m=f"tcp://127.0.0.1:{self.mqtt_port}"))
-        user = UserData(uid=1, tokentype="token_type", token="abc123", rruid="abc123", region="us",
-                        countrycode="1", country="US", nickname="tester", rriot=rriot)
+        rriot = RRiot(
+            u=USER.u,
+            s=USER.s,
+            h=USER.h,
+            k=USER.k,
+            r=Reference(r="US", a=self.url, l=self.url, m=f"tcp://127.0.0.1:{self.mqtt_port}"),
+        )
+        user = UserData(
+            uid=1,
+            tokentype="token_type",
+            token="abc123",
+            rruid="abc123",
+            region="us",
+            countrycode="1",
+            country="US",
+            nickname="tester",
+            rriot=rriot,
+        )
         return web.json_response({"code": 200, "msg": "success", "data": user.as_dict()})
 
     async def home_detail(self, request):
-        return web.json_response({"code": 200, "msg": "success", "data": {"rrHomeId": 1, "id": 1, "name": "Home"}})
+        return web.json_response(
+            {"code": 200, "msg": "success", "data": {"rrHomeId": 1, "id": 1, "name": "Home"}}
+        )
 
     async def homes(self, request):
-        product = HomeDataProduct(id="product-1", name="Roborock Vacuum", model="roborock.vacuum.fake",
-                                  category=RoborockCategory.VACUUM)
-        device = HomeDataDevice(duid=DUID, name="Fakey", local_key=LOCAL_KEY, product_id=product.id,
-                                sn="FAKE-SERIAL", pv="1.0")
+        product = HomeDataProduct(
+            id="product-1",
+            name="Roborock Vacuum",
+            model="roborock.vacuum.fake",
+            category=RoborockCategory.VACUUM,
+        )
+        device = HomeDataDevice(
+            duid=DUID,
+            name="Fakey",
+            local_key=LOCAL_KEY,
+            product_id=product.id,
+            sn="FAKE-SERIAL",
+            pv="1.0",
+        )
         home = HomeData(id=1, name="Home", devices=[device], products=[product])
-        return web.json_response({"api": None, "code": 200, "success": True, "status": "ok",
-                                  "result": home.as_dict()})
+        return web.json_response(
+            {"api": None, "code": 200, "success": True, "status": "ok", "result": home.as_dict()}
+        )
 
     async def unknown(self, request):
         self.unknown_requests.append(f"{request.method} {request.path_qs}")
@@ -190,9 +240,20 @@ class Cloud:
 
 def fresh_state():
     return {
-        "state": 8, "battery": 87, "error_code": 0, "in_cleaning": 0, "dock_error_status": 0,
-        "clean_time": 100, "clean_area": 1000, "volume": 30, "lock_status": 0, "led": 1,
-        "dnd": [22, 0, 7, 0], "msg_ver": 2, "fan_power": 102, "water_box_mode": 200,
+        "state": 8,
+        "battery": 87,
+        "error_code": 0,
+        "in_cleaning": 0,
+        "dock_error_status": 0,
+        "clean_time": 100,
+        "clean_area": 1000,
+        "volume": 30,
+        "lock_status": 0,
+        "led": 1,
+        "dnd": [22, 0, 7, 0],
+        "msg_ver": 2,
+        "fan_power": 102,
+        "water_box_mode": 200,
     }
 
 
@@ -217,7 +278,9 @@ class Vacuum:
 
     async def run(self):
         decode, encode = create_mqtt_decoder(LOCAL_KEY), create_mqtt_encoder(LOCAL_KEY)
-        async with aiomqtt.Client("127.0.0.1", self.broker_port, protocol=aiomqtt.ProtocolVersion.V5) as client:
+        async with aiomqtt.Client(
+            "127.0.0.1", self.broker_port, protocol=aiomqtt.ProtocolVersion.V5
+        ) as client:
             await client.subscribe(f"rr/m/i/{self.user_topic()}")
             async for message in client.messages:
                 for incoming in decode(message.payload):
@@ -226,26 +289,67 @@ class Vacuum:
                     reply = self.answer(request["method"], request.get("params"))
                     inner = {"id": request["id"], **reply}
                     payload = {"dps": {"102": json.dumps(inner)}, "t": int(time.time())}
-                    outgoing = RoborockMessage(protocol=RoborockMessageProtocol.RPC_RESPONSE,
-                                               payload=json.dumps(payload).encode(), version=b"1.0",
-                                               seq=incoming.seq, timestamp=int(time.time()))
+                    outgoing = RoborockMessage(
+                        protocol=RoborockMessageProtocol.RPC_RESPONSE,
+                        payload=json.dumps(payload).encode(),
+                        version=b"1.0",
+                        seq=incoming.seq,
+                        timestamp=int(time.time()),
+                    )
                     await client.publish(f"rr/m/o/{self.user_topic()}", encode(outgoing))
 
     def answer(self, method, params):
         s = self.state
         match method:
             case "get_status":
-                return {"result": [{k: s[k] for k in ("msg_ver", "state", "battery", "error_code", "in_cleaning",
-                                                       "dock_error_status", "clean_time", "clean_area", "lock_status",
-                                                       "fan_power", "water_box_mode")}]}
+                return {
+                    "result": [
+                        {
+                            k: s[k]
+                            for k in (
+                                "msg_ver",
+                                "state",
+                                "battery",
+                                "error_code",
+                                "in_cleaning",
+                                "dock_error_status",
+                                "clean_time",
+                                "clean_area",
+                                "lock_status",
+                                "fan_power",
+                                "water_box_mode",
+                            )
+                        }
+                    ]
+                }
             case "get_network_info":
-                return {"result": {"ip": "127.0.0.1", "ssid": "fake-wifi", "mac": "aa:bb:cc:dd:ee:ff",
-                                   "bssid": "aa:bb:cc:dd:ee:ff", "rssi": -50}}
+                return {
+                    "result": {
+                        "ip": "127.0.0.1",
+                        "ssid": "fake-wifi",
+                        "mac": "aa:bb:cc:dd:ee:ff",
+                        "bssid": "aa:bb:cc:dd:ee:ff",
+                        "rssi": -50,
+                    }
+                }
             case "app_get_init_status":
-                return {"result": [{"local_info": {"location": "us", "bom": "A.03.0069", "featureset": 1,
-                                                    "language": "en", "name": "fake"},
-                                    "feature_info": [111, 112], "new_feature_info": 0,
-                                    "new_feature_info_str": "0000000000002000", "new_feature_info_2": 8192}]}
+                return {
+                    "result": [
+                        {
+                            "local_info": {
+                                "location": "us",
+                                "bom": "A.03.0069",
+                                "featureset": 1,
+                                "language": "en",
+                                "name": "fake",
+                            },
+                            "feature_info": [111, 112],
+                            "new_feature_info": 0,
+                            "new_feature_info_str": "0000000000002000",
+                            "new_feature_info_2": 8192,
+                        }
+                    ]
+                }
             case "get_sound_volume":
                 return {"result": [s["volume"]]}
             case "change_sound_volume":
@@ -262,15 +366,34 @@ class Vacuum:
                 s["led"] = params[0]
                 return {"result": ["ok"]}
             case "get_dnd_timer":
-                return {"result": [{"start_hour": s["dnd"][0], "start_minute": s["dnd"][1],
-                                    "end_hour": s["dnd"][2], "end_minute": s["dnd"][3], "enabled": 1}]}
+                return {
+                    "result": [
+                        {
+                            "start_hour": s["dnd"][0],
+                            "start_minute": s["dnd"][1],
+                            "end_hour": s["dnd"][2],
+                            "end_minute": s["dnd"][3],
+                            "enabled": 1,
+                        }
+                    ]
+                }
             case "set_dnd_timer":
                 s["dnd"] = params
                 return {"result": ["ok"]}
             case "get_room_mapping":
                 return {"result": [[1, "100", 1], [2, "200", 15]]}
-            case "find_me" | "app_charge" | "app_stop" | "app_pause" | "app_start" | "app_segment_clean" \
-                    | "resume_segment_clean" | "resume_zoned_clean" | "app_set_dryer_status" | "resolve_error":
+            case (
+                "find_me"
+                | "app_charge"
+                | "app_stop"
+                | "app_pause"
+                | "app_start"
+                | "app_segment_clean"
+                | "resume_segment_clean"
+                | "resume_zoned_clean"
+                | "app_set_dryer_status"
+                | "resolve_error"
+            ):
                 self.act(method, params)
                 return {"result": ["ok"]}
         return {"result": "unknown_method"}  # what real robots answer for a method they lack
