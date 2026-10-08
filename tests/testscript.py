@@ -20,6 +20,7 @@ A script is a list of commands followed by files, each introduced by a line like
 
 A leading `!` flips any command. A leading `[darwin]` or `[linux]` runs it on that system only.
 """
+
 import json
 import os
 import re
@@ -90,8 +91,15 @@ def parse(text):
 
 class Background:
     def __init__(self, args, env, cwd, stdin):
-        self.process = subprocess.Popen(args, env=env, cwd=cwd, stdin=stdin, stdout=subprocess.PIPE,
-                                        stderr=subprocess.STDOUT, text=True)
+        self.process = subprocess.Popen(
+            args,
+            env=env,
+            cwd=cwd,
+            stdin=stdin,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
         self.output = []
         threading.Thread(target=self.collect, daemon=True).start()
 
@@ -127,11 +135,20 @@ class Script:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
         (self.work / "roborock").symlink_to(ROBORROCK)
-        self.env = {key: value for key, value in os.environ.items() if not key.startswith(("XDG_", "ROBORROCK_"))}
+        self.env = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith(("XDG_", "ROBORROCK_"))
+        }
         self.env.update(
-            HOME=str(self.home), WORK=str(self.work), NO_COLOR="1", ROBORROCK_PORT=str(port),
-            ROBORROCK_API_URL=self.world.cloud.url, PYTHON_KEYRING_BACKEND="fake_keyring.FileKeyring",
-            PYTHONPATH=str(HERE), TEST_KEYRING_FILE=str(folder / "keyring.json"),
+            HOME=str(self.home),
+            WORK=str(self.work),
+            NO_COLOR="1",
+            ROBORROCK_PORT=str(port),
+            ROBORROCK_API_URL=self.world.cloud.url,
+            PYTHON_KEYRING_BACKEND="fake_keyring.FileKeyring",
+            PYTHONPATH=str(HERE),
+            TEST_KEYRING_FILE=str(folder / "keyring.json"),
             SERVICE_LOG=str(self.work / "service.log"),
             PATH=os.pathsep.join([str(HERE / "bin"), str(self.work), os.environ["PATH"]]),
         )
@@ -187,11 +204,20 @@ class Script:
         args = args[:-1] if background else args
         stdin, self.stdin = self.stdin, None
         if background:
-            self.background.append(Background(args, self.env, self.work, stdin or subprocess.DEVNULL))
+            self.background.append(
+                Background(args, self.env, self.work, stdin or subprocess.DEVNULL)
+            )
             return
         try:
-            done = subprocess.run(args, env=self.env, cwd=self.work, stdin=stdin or subprocess.DEVNULL,
-                                  capture_output=True, text=True, timeout=60)
+            done = subprocess.run(
+                args,
+                env=self.env,
+                cwd=self.work,
+                stdin=stdin or subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
         except FileNotFoundError:
             raise Failure(f"{args[0]}: command not found") from None
         self.stdout, self.stderr = done.stdout, done.stderr
@@ -201,15 +227,25 @@ class Script:
         self.stdin = open(self.work / args[0])
 
     def cmd_stdout(self, negate, args):
-        self.check(negate, re.search(args[0], self.stdout, re.M), f"stdout does not match {args[0]!r}")
+        self.check(
+            negate, re.search(args[0], self.stdout, re.M), f"stdout does not match {args[0]!r}"
+        )
 
     def cmd_stderr(self, negate, args):
-        self.check(negate, re.search(args[0], self.stderr, re.M), f"stderr does not match {args[0]!r}")
+        self.check(
+            negate, re.search(args[0], self.stderr, re.M), f"stderr does not match {args[0]!r}"
+        )
 
     def cmd_await(self, negate, args):
         process = self.background[-1]
-        self.wait_for(lambda: re.search(args[0], process.text, re.M) or process.process.poll() is not None)
-        self.check(negate, re.search(args[0], process.text, re.M), f"the background program did not print {args[0]!r}")
+        self.wait_for(
+            lambda: re.search(args[0], process.text, re.M) or process.process.poll() is not None
+        )
+        self.check(
+            negate,
+            re.search(args[0], process.text, re.M),
+            f"the background program did not print {args[0]!r}",
+        )
 
     def cmd_kill(self, negate, args):
         process = self.background.pop()
@@ -217,10 +253,18 @@ class Script:
         self.stdout = process.text
 
     def cmd_exists(self, negate, args):
-        self.check(negate, (self.work / args[0]).exists() or Path(args[0]).exists(), f"{args[0]} does not exist")
+        self.check(
+            negate,
+            (self.work / args[0]).exists() or Path(args[0]).exists(),
+            f"{args[0]} does not exist",
+        )
 
     def cmd_grep(self, negate, args):
-        text = Path(args[1]).read_text() if Path(args[1]).is_absolute() else (self.work / args[1]).read_text()
+        text = (
+            Path(args[1]).read_text()
+            if Path(args[1]).is_absolute()
+            else (self.work / args[1]).read_text()
+        )
         self.check(negate, re.search(args[0], text, re.M), f"{args[1]} does not match {args[0]!r}")
 
     def cmd_sleep(self, negate, args):
@@ -245,12 +289,24 @@ class Script:
             self.check(negate, ok, f"{rest[0]} is {vacuum.state[rest[0]]!r}, not {rest[1]}")
         elif action == "sent":
             want = [json.loads(rest[1])] if len(rest) > 1 else None
-            seen = [params for method, params in vacuum.requests if method == rest[0] and want in (None, [params])]
-            self.check(negate, seen, f"the robot did not get {rest[0]} {rest[1:]}; it got {vacuum.requests}")
+            seen = [
+                params
+                for method, params in vacuum.requests
+                if method == rest[0] and want in (None, [params])
+            ]
+            self.check(
+                negate,
+                seen,
+                f"the robot did not get {rest[0]} {rest[1:]}; it got {vacuum.requests}",
+            )
         elif action == "clear":
             vacuum.requests.clear()
         else:
             raise Failure(f"unknown vacuum action {action!r}")
 
     def cmd_cloud(self, negate, args):
-        self.check(negate, args[1] in self.world.cloud.codes_requested, f"the cloud was not asked to email {args[1]}")
+        self.check(
+            negate,
+            args[1] in self.world.cloud.codes_requested,
+            f"the cloud was not asked to email {args[1]}",
+        )

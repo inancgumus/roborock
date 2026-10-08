@@ -24,6 +24,10 @@ Use the `write` skill for the README and every other piece of prose, if it is av
 Never print the login token, the server secret or the robot's serial number.
 Commands that read them must not echo them.
 
+## Code style
+
+Format the Python with `uvx ruff format`. The line length is 100, set in `pyproject.toml`.
+
 ## Tests
 
 Run `./tests/test_scripts.py` before every commit.
