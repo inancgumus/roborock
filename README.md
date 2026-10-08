@@ -2,7 +2,9 @@ Control a Roborock vacuum from the terminal.
 
 ## Quick start
 
-Start the server in its own terminal and leave it running. It logs in with an emailed code the first time and keeps one connection to the vacuum open.
+Start the server in its own terminal and leave it running.
+
+The first time, it asks for your email and logs in with the code it emails you.
 
 ```sh
 ./roborock.py
@@ -19,7 +21,10 @@ Then send commands from any other terminal. They find the server on their own.
 
 ## Commands
 
-Commands are `<area> <verb>`. Run an area alone to list its commands, or add `-h` to a command to see what it needs.
+Commands are `<area> <verb>`.
+
+- Run an area alone to list its commands, like `./roborock.py clean`.
+- Add `-h` to a command to see what it needs.
 
 | Command | What it does |
 | --- | --- |
@@ -37,7 +42,11 @@ Commands are `<area> <verb>`. Run an area alone to list its commands, or add `-h
 
 ## Bumper stuck
 
-The vacuum sometimes stops with "bumper stuck" even when the bumper is fine. This clears the error and resumes the clean, checking every second until you stop it with Ctrl-C:
+The vacuum sometimes stops with "bumper stuck" even when the bumper is fine.
+
+This clears the error and resumes the clean every time it happens.
+
+It checks every second until you stop it with Ctrl-C:
 
 ```sh
 ./roborock.py nobumperstuck
@@ -48,4 +57,4 @@ The vacuum sometimes stops with "bumper stuck" even when the bumper is fine. Thi
 | File | Holds |
 | --- | --- |
 | `~/.roborock-autoresume.json` | The login token |
-| `~/.roborock-supervisor.sock` | The socket commands use to reach the server. Only your user can connect |
+| `~/.roborock-supervisor.sock` | Where commands reach the server. Only you can connect |
