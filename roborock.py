@@ -266,6 +266,16 @@ def bold(text):
     return f"\033[1m{text}\033[0m" if sys.stdout.isatty() else text
 
 
+def error(text):
+    red = sys.stderr.isatty()
+    print(f"\033[1;31m{text}\033[0m" if red else text, file=sys.stderr, flush=True)
+
+
+def fail(text):
+    error(text)
+    sys.exit(1)
+
+
 def say(text):
     print(bold(text), flush=True)
 
@@ -347,7 +357,7 @@ async def run():
             await resume_if_stuck()
         except RuntimeError:
             logging.exception("Could not resume")
-            say("Something went wrong. Trying again in a second. The log has the details.")
+            error("Something went wrong. Trying again in a second. The log has the details.")
         await asyncio.sleep(1)
 
 
@@ -377,7 +387,9 @@ class Parser(argparse.ArgumentParser):
     def error(self, message):
         if "invalid choice" in message:
             message = f"unknown command {message.split(chr(39))[1]!r}. Run ./roborock.py -h to list them"
-        super().error(message)
+        self.print_usage(sys.stderr)
+        error(f"{self.prog}: error: {message}")
+        sys.exit(2)
 
 
 def build_parser():
@@ -432,7 +444,7 @@ async def serve():
         try:
             server = await asyncio.start_server(handle, HOST, PORT)
         except OSError as err:
-            sys.exit(f"Cannot listen on port {PORT}: {err}")
+            fail(f"Cannot listen on port {PORT}: {err}")
         keyring.set_password("roborock", "server", secret)
         say(f"🎉 Ready! Serving {vacuum.name}. Leave this running.")
         say("In another terminal, run ./roborock.py <command>, like ./roborock.py find.")
@@ -447,7 +459,7 @@ async def request(command, params):
             raise ConnectionRefusedError
         reader, writer = await asyncio.open_connection(HOST, PORT)
     except ConnectionRefusedError:
-        sys.exit("No server is running. Start one in another terminal with ./roborock.py, then try again.")
+        fail("No server is running. Start one in another terminal with ./roborock.py, then try again.")
     writer.write(json.dumps({"secret": secret, "command": command.value, "params": params}).encode() + b"\n")
     reply = json.loads(await reader.readline())
     writer.close()
@@ -460,7 +472,7 @@ async def send(command, params):
     try:
         print(await request(command, params))
     except RuntimeError as err:
-        sys.exit(str(err))
+        fail(str(err))
 
 
 def main():
