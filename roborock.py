@@ -16,6 +16,8 @@ Usage:
     ./roborock.py stop                   Stop cleaning
     ./roborock.py charge                 Go back to the dock
     ./roborock.py <command>              Send any other command below
+    ./roborock.py install                Start the server whenever you log in
+    ./roborock.py uninstall              Stop starting the server when you log in
     ./roborock.py -v ...                 Also show the log, which is kept in a file otherwise
 """
 import argparse
@@ -26,7 +28,12 @@ import itertools
 import json
 import logging
 import logging.handlers
+import os
+import plistlib
 import secrets
+import shlex
+import shutil
+import subprocess
 import sys
 import time
 from collections.abc import Callable
@@ -45,6 +52,7 @@ from roborock.devices.traits.v1.consumeable import ConsumableAttribute
 from roborock.roborock_typing import RoborockCommand
 from roborock.web_api import RoborockApiClient
 
+SERVICE = "io.github.inancgumus.roborock"
 HOST, PORT = "127.0.0.1", 47651  # the server only listens on this computer
 
 
@@ -397,6 +405,8 @@ def build_parser():
     areas = parser.add_subparsers(dest="area", metavar="<command>", parser_class=Parser)
     areas.add_parser("nobumperstuck", description='Resume each time it reports "bumper stuck"')
     areas.add_parser("resume", description="Continue a paused clean")
+    areas.add_parser("install", description="Start the server whenever you log in")
+    areas.add_parser("uninstall", description="Stop starting the server when you log in")
     for name, (_, text) in ALIASES.items():
         areas.add_parser(name, description=text)
     for area, (title, cmds) in AREAS.items():
@@ -452,6 +462,54 @@ async def serve():
             await server.serve_forever()
 
 
+def service_files():
+    command = [shutil.which("uv") or fail("Cannot find uv on your PATH."), "run", "--script", str(Path(__file__).resolve())]
+    if sys.platform == "darwin":
+        return command, Path.home() / "Library/LaunchAgents" / f"{SERVICE}.plist"
+    return command, Path.home() / ".config/systemd/user/roborock.service"
+
+
+def install():
+    if keyring.get_password("roborock", "session") is None:
+        fail("Log in first. Run ./roborock.py once, then run install again.")
+    command, file = service_files()
+    log = Path(user_log_dir("roborock")) / "service.log"
+    if sys.platform == "win32":
+        subprocess.run(["schtasks", "/Create", "/TN", "roborock", "/SC", "ONLOGON", "/F",
+                        "/TR", subprocess.list2cmdline(command)], check=True)
+        subprocess.run(["schtasks", "/Run", "/TN", "roborock"], check=True)
+    elif sys.platform == "darwin":
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_bytes(plistlib.dumps({
+            "Label": SERVICE, "ProgramArguments": command, "RunAtLoad": True,
+            "KeepAlive": {"SuccessfulExit": False},  # a second server exits cleanly and stays stopped
+            "StandardOutPath": str(log), "StandardErrorPath": str(log),
+        }))
+        subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{SERVICE}"], capture_output=True)
+        subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(file)], check=True)
+    else:
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(f"[Unit]\nDescription=Roborock server\n\n[Service]\nExecStart={shlex.join(command)}\n"
+                        "Restart=on-failure\n\n[Install]\nWantedBy=default.target\n")
+        subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+        subprocess.run(["systemctl", "--user", "enable", "--now", "roborock.service"], check=True)
+    say("Installed. The server starts when you log in, and it is starting now.")
+
+
+def uninstall():
+    _, file = service_files()
+    if sys.platform == "win32":
+        subprocess.run(["schtasks", "/Delete", "/TN", "roborock", "/F"], check=True)
+    elif sys.platform == "darwin":
+        subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{SERVICE}"], capture_output=True)
+        file.unlink(missing_ok=True)
+    else:
+        subprocess.run(["systemctl", "--user", "disable", "--now", "roborock.service"], check=True)
+        file.unlink(missing_ok=True)
+        subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+    say("Uninstalled. The server no longer starts when you log in.")
+
+
 async def request(command, params):
     secret = keyring.get_password("roborock", "server")
     try:
@@ -488,6 +546,10 @@ def main():
         args = build_parser().parse_args(argv)
         if args.area in AREAS and not args.verb:
             print("\n".join(area_lines(args.area)))
+        elif args.area == "install":
+            install()
+        elif args.area == "uninstall":
+            uninstall()
         elif args.area == "nobumperstuck":
             asyncio.run(run())
         elif args.area == "resume":

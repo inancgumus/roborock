@@ -19,6 +19,18 @@ Then send commands from any other terminal. They find the server on their own.
 ./roborock.py quiet set 22:00 08:00
 ```
 
+## Start on login
+
+Start the server automatically whenever you log in:
+
+```sh
+./roborock.py install
+```
+
+Run `./roborock.py` once first, so it can log in with your emailed code.
+
+Undo it with `./roborock.py uninstall`.
+
 ## Commands
 
 Commands are `<area> <verb>`.
