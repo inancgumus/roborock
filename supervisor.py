@@ -347,8 +347,9 @@ async def serve():
                 reply = {"result": result}
             except Exception as err:
                 reply = {"error": f"{type(err).__name__}: {err}"}
-            writer.write(json.dumps(reply, default=str).encode() + b"\n")
-            await writer.drain()
+            with contextlib.suppress(ConnectionError):  # the client left before the reply
+                writer.write(json.dumps(reply, default=str).encode() + b"\n")
+                await writer.drain()
             writer.close()
 
         SOCKET_FILE.unlink(missing_ok=True)
