@@ -6,9 +6,9 @@
 """Control a Roborock vacuum.
 
 Usage:
+    ./roborock.py                        Start the server. Do this first, in its own terminal
     ./roborock.py login you@example.com  Log in with an emailed code
     ./roborock.py nobumperstuck          Resume each time it reports "bumper stuck"
-    ./roborock.py serve                  Keep one connection open so commands run fast
     ./roborock.py find                   Say "I'm over here"
     ./roborock.py start                  Start cleaning
     ./roborock.py pause                  Pause cleaning
@@ -248,15 +248,15 @@ async def login(email):
     print("Logged in.")
 
 
-async def resume_if_stuck(status, command):
-    await status.refresh()
-    if status.error_code != RoborockErrorCode.bumper_stuck:
+async def resume_if_stuck():
+    [status] = await request(RoborockCommand.GET_STATUS, None)
+    if status["error_code"] != RoborockErrorCode.bumper_stuck:
         return
     logging.warning("Bumper stuck, continuing")
-    await status.resolve_error()
-    if status.state in (RoborockStateCode.paused, RoborockStateCode.error):
-        mode = int(status.in_cleaning or 0)
-        await command.send(RESUME_COMMANDS.get(mode, RoborockCommand.APP_START))
+    await request(RoborockCommand.RESOLVE_ERROR, {"error_code": status["error_code"]})
+    if status["state"] in (RoborockStateCode.paused, RoborockStateCode.error):
+        mode = int(status["in_cleaning"] or 0)
+        await request(RESUME_COMMANDS.get(mode, RoborockCommand.APP_START), None)
 
 
 @contextlib.asynccontextmanager
@@ -271,16 +271,13 @@ async def connect():
 
 
 async def run():
-    async with connect() as vacuum:
-        status = vacuum.v1_properties.status
-        command = vacuum.v1_properties.command
-        logging.info("Watching %s.", vacuum.name)
-        while True:
-            try:
-                await resume_if_stuck(status, command)
-            except Exception:
-                logging.exception("Failed, retrying in 1s")
-            await asyncio.sleep(1)
+    logging.info("Watching for bumper stuck.")
+    while True:
+        try:
+            await resume_if_stuck()
+        except RuntimeError:
+            logging.exception("Failed, retrying in 1s")
+        await asyncio.sleep(1)
 
 
 def command_value(name):
@@ -317,7 +314,6 @@ def build_parser():
     parser = Parser(prog="./roborock.py", add_help=False)
     commands = parser.add_subparsers(dest="name", metavar="<command>", parser_class=Parser)
     commands.add_parser("login", description="Log in with an emailed code").add_argument("email")
-    commands.add_parser("serve", description="Keep one connection open so commands run fast")
     commands.add_parser("nobumperstuck", description='Resume each time it reports "bumper stuck"')
     for name, (_, text) in ALIASES.items():
         commands.add_parser(name, description=text)
@@ -337,7 +333,7 @@ async def serve():
         pass
     else:
         writer.close()
-        sys.exit("Already serving.")
+        sys.exit("A server is already running. Run ./roborock.py -h to see the commands.")
     async with connect() as vacuum:
         command = vacuum.v1_properties.command
 
@@ -359,7 +355,11 @@ async def serve():
             server = await asyncio.start_unix_server(handle, SOCKET_FILE)
         finally:
             os.umask(previous)
-        logging.info("Serving %s. Commands now skip the connection wait.", vacuum.name)
+        print(
+            f"Serving {vacuum.name}. Leave this running.\n"
+            "In another terminal, run ./roborock.py <command>, like ./roborock.py find.\n"
+            "Commands find this server on their own. ./roborock.py -h lists them."
+        )
         try:
             async with server:
                 await server.serve_forever()
@@ -367,24 +367,32 @@ async def serve():
             SOCKET_FILE.unlink(missing_ok=True)
 
 
-async def send(command, params):
+async def request(command, params):
     try:
         reader, writer = await asyncio.open_unix_connection(SOCKET_FILE)
     except (FileNotFoundError, ConnectionRefusedError):
-        async with connect() as vacuum:
-            print(await vacuum.v1_properties.command.send(command, params))
-        return
+        sys.exit("No server is running. Start one in another terminal with ./roborock.py, then try again.")
     writer.write(json.dumps({"command": command.value, "params": params}).encode() + b"\n")
     reply = json.loads(await reader.readline())
     writer.close()
     if "error" in reply:
-        sys.exit(reply["error"])
-    print(reply["result"])
+        raise RuntimeError(reply["error"])
+    return reply["result"]
+
+
+async def send(command, params):
+    try:
+        print(await request(command, params))
+    except RuntimeError as err:
+        sys.exit(str(err))
 
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
-    if sys.argv[1:] in ([], ["-h"], ["--help"]):
+    if sys.argv[1:] == []:
+        asyncio.run(serve())
+        return
+    if sys.argv[1:] in (["-h"], ["--help"]):
         print(help_text())
         return
     args = build_parser().parse_args()
@@ -392,8 +400,6 @@ def main():
     try:
         if args.name == "login":
             asyncio.run(login(args.email))
-        elif args.name == "serve":
-            asyncio.run(serve())
         elif args.name == "nobumperstuck":
             asyncio.run(run())
         elif args.name in ALIASES:
