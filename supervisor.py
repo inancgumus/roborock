@@ -14,6 +14,8 @@ Usage:
     ./supervisor.py stop                   Stop cleaning
     ./supervisor.py charge                 Go back to the dock
     ./supervisor.py <command>              Send any other command below
+    ./supervisor.py -h                     Show this help
+    ./supervisor.py <command> -h           Show what a command needs
 """
 import argparse
 import asyncio
@@ -308,8 +310,7 @@ class Parser(argparse.ArgumentParser):
 
 
 def build_parser():
-    parser = Parser(prog="./supervisor.py", usage=argparse.SUPPRESS, formatter_class=argparse.RawDescriptionHelpFormatter,
-                                     description=help_text())
+    parser = Parser(prog="./supervisor.py", add_help=False)
     commands = parser.add_subparsers(dest="name", metavar="<command>", parser_class=Parser)
     commands.add_parser("login", description="Log in with an emailed code").add_argument("email")
     commands.add_parser("nobumperstuck", description='Resume each time it reports "bumper stuck"')
@@ -331,11 +332,10 @@ async def send(command, params):
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
-    parser = build_parser()
-    args = parser.parse_args()
-    if not args.name:
-        parser.print_help()
+    if sys.argv[1:] in ([], ["-h"], ["--help"]):
+        print(help_text())
         return
+    args = build_parser().parse_args()
     cmds = {cmd.name: cmd for group in GROUPS.values() for cmd in group}
     try:
         if args.name == "login":
