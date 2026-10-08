@@ -47,7 +47,8 @@ from roborock.web_api import RoborockApiClient
 CONFIG_FILE = Path(user_config_dir("roborock")) / "config.json"
 SETTINGS = {"bumper": 'Resume the clean when the robot reports "bumper stuck"'}  # all on by default
 SERVICE = "io.github.inancgumus.roborock"
-HOST, PORT = "127.0.0.1", 47651  # the server only listens on this computer
+HOST, PORT = "127.0.0.1", int(os.environ.get("ROBORROCK_PORT", 47651))  # the server only listens on this computer
+API_URL = os.environ.get("ROBORROCK_API_URL")  # replaces Roborock's own servers, for testing
 
 
 # Plain app_start would restart a room or zone clean from scratch
@@ -107,7 +108,7 @@ def setup_logging(verbose):
 
 
 async def login(email):
-    client = RoborockApiClient(email)
+    client = RoborockApiClient(email, base_url=API_URL)
     await client.request_code()
     user_data = await client.code_login(input(bold("Code from email: ")).strip())
     keyring.set_password("roborock", "session", json.dumps({"email": email, "user_data": user_data.as_dict()}))
@@ -158,7 +159,7 @@ async def watch(call):
 @contextlib.asynccontextmanager
 async def connect():
     saved = json.loads(keyring.get_password("roborock", "session"))
-    params = UserParams(saved["email"], UserData.from_dict(saved["user_data"]))
+    params = UserParams(saved["email"], UserData.from_dict(saved["user_data"]), base_url=API_URL)
     async with sweeping("Connecting to your account"):
         manager = await create_device_manager(params)
     try:
