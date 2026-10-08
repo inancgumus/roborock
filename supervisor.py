@@ -8,6 +8,7 @@
 Usage:
     ./supervisor.py login you@example.com  Log in with an emailed code
     ./supervisor.py nobumperstuck          Resume each time it reports "bumper stuck"
+    ./supervisor.py serve                  Keep one connection open so commands run fast
     ./supervisor.py find                   Say "I'm over here"
     ./supervisor.py start                  Start cleaning
     ./supervisor.py pause                  Pause cleaning
@@ -22,6 +23,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import sys
 import time
 from collections.abc import Callable
@@ -36,6 +38,7 @@ from roborock.roborock_typing import RoborockCommand
 from roborock.web_api import RoborockApiClient
 
 SESSION_FILE = Path.home() / ".roborock-autoresume.json"
+SOCKET_FILE = Path.home() / ".roborock-supervisor.sock"
 
 
 class Arg(NamedTuple):
@@ -313,6 +316,7 @@ def build_parser():
     parser = Parser(prog="./supervisor.py", add_help=False)
     commands = parser.add_subparsers(dest="name", metavar="<command>", parser_class=Parser)
     commands.add_parser("login", description="Log in with an emailed code").add_argument("email")
+    commands.add_parser("serve", description="Keep one connection open so commands run fast")
     commands.add_parser("nobumperstuck", description='Resume each time it reports "bumper stuck"')
     for name, (_, text) in ALIASES.items():
         commands.add_parser(name, description=text)
@@ -325,9 +329,55 @@ def build_parser():
     return parser
 
 
-async def send(command, params):
+async def serve():
+    try:
+        _, writer = await asyncio.open_unix_connection(SOCKET_FILE)
+    except (FileNotFoundError, ConnectionRefusedError):
+        pass
+    else:
+        writer.close()
+        sys.exit("Already serving.")
     async with connect() as vacuum:
-        print(await vacuum.v1_properties.command.send(command, params))
+        command = vacuum.v1_properties.command
+
+        async def handle(reader, writer):
+            try:
+                request = json.loads(await reader.readline())
+                result = await command.send(RoborockCommand(request["command"]), request["params"])
+                reply = {"result": result}
+            except Exception as err:
+                reply = {"error": f"{type(err).__name__}: {err}"}
+            writer.write(json.dumps(reply, default=str).encode() + b"\n")
+            await writer.drain()
+            writer.close()
+
+        SOCKET_FILE.unlink(missing_ok=True)
+        previous = os.umask(0o177)  # only this user may connect
+        try:
+            server = await asyncio.start_unix_server(handle, SOCKET_FILE)
+        finally:
+            os.umask(previous)
+        logging.info("Serving %s. Commands now skip the connection wait.", vacuum.name)
+        try:
+            async with server:
+                await server.serve_forever()
+        finally:
+            SOCKET_FILE.unlink(missing_ok=True)
+
+
+async def send(command, params):
+    try:
+        reader, writer = await asyncio.open_unix_connection(SOCKET_FILE)
+    except (FileNotFoundError, ConnectionRefusedError):
+        async with connect() as vacuum:
+            print(await vacuum.v1_properties.command.send(command, params))
+        return
+    writer.write(json.dumps({"command": command.value, "params": params}).encode() + b"\n")
+    reply = json.loads(await reader.readline())
+    writer.close()
+    if "error" in reply:
+        sys.exit(reply["error"])
+    print(reply["result"])
 
 
 def main():
@@ -340,6 +390,8 @@ def main():
     try:
         if args.name == "login":
             asyncio.run(login(args.email))
+        elif args.name == "serve":
+            asyncio.run(serve())
         elif args.name == "nobumperstuck":
             asyncio.run(run())
         elif args.name in ALIASES:
