@@ -28,7 +28,3 @@ stderr "unknown command 'nope'"
 # A method this robot lacks is reported as an error
 ! exec roborock schedules list
 stderr 'not recognized by the device'
-
--- login.txt --
-me@example.com
-123456

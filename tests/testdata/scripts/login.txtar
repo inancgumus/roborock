@@ -11,7 +11,3 @@ stdout "'battery': 87"
 # The library's own logs stay out of the terminal
 kill
 ! stdout 'MQTT'
-
--- login.txt --
-me@example.com
-123456

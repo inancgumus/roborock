@@ -32,7 +32,3 @@ exec roborock drying start
 vacuum sent app_set_dryer_status '{"status": 1}'
 exec roborock drying stop
 vacuum sent app_set_dryer_status '{"status": 0}'
-
--- login.txt --
-me@example.com
-123456
