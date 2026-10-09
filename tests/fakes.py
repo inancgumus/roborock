@@ -144,6 +144,7 @@ class Cloud:
         app.router.add_post("/api/v1/sendEmailCode", self.send_code)
         app.router.add_post("/api/v1/loginWithCode", self.login)
         app.router.add_get("/api/v1/getHomeDetail", self.home_detail)
+        app.router.add_get("/user/homes/{id}/rooms", self.rooms)
         for path in ("/user/homes/{id}", "/v2/user/homes/{id}", "/v3/user/homes/{id}"):
             app.router.add_get(path, self.homes)
         self.runner = web.AppRunner(app)
@@ -180,6 +181,10 @@ class Cloud:
     async def home_detail(self, request):
         data = {"rrHomeId": 1, "id": 1, "name": "Home"}
         return web.json_response({"code": 200, "msg": "success", "data": data})
+
+    async def rooms(self, request):
+        rooms = [{"id": 100, "name": "Kitchen"}, {"id": 200, "name": "Bedroom"}]
+        return web.json_response({"code": 200, "success": True, "result": rooms})
 
     async def homes(self, request):
         product = HomeDataProduct(
@@ -353,6 +358,26 @@ class Vacuum:
 
     def do_set_dnd_timer(self, params):
         return self.update(dnd=params)
+
+    def do_get_valley_electricity_timer(self, params):
+        return [{"start_hour": 0, "start_minute": 0, "end_hour": 0, "end_minute": 0, "enabled": 0}]
+
+    def do_get_clean_summary(self, params):
+        return [18000, 50_000_000, 12, [1, 2]]
+
+    def do_app_get_clean_estimate_info(self, params):
+        return {
+            "clean_estimate": {
+                "total_area": 106_950_000,
+                "remaining_area": 47_100_000,
+                "total_time": 8983,
+                "remaining_time": 3956,
+            }
+        }
+
+    def do_get_consumable(self, params):
+        worn = {"main_brush_work_time": 36000, "side_brush_work_time": 36000}
+        return [{**worn, "filter_work_time": 36000, "sensor_dirty_time": 3600}]
 
     def do_get_room_mapping(self, params):
         return [[1, "100", 1], [2, "200", 15]]

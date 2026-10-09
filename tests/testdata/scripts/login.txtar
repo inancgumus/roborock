@@ -6,7 +6,7 @@ await 'Ready!'
 await 'Serving Fakey'
 cloud asked me@example.com
 exec roborock status show
-stdout "'battery': 87"
+stdout 'Battery: 87%'
 
 # The library's own logs stay out of the terminal
 kill

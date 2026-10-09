@@ -5,17 +5,38 @@ vacuum clear
 
 # Reading
 exec roborock status show
-stdout "'battery': 87"
+stdout '^State: Charging$'
+stdout '^Battery: 87%$'
+stdout '^No errors$'
+stdout '^Last clean: 0\.0 m² in 1 min$'
+! stdout '[\[{]'
+exec roborock quiet show
+stdout '^On, from 22:00 to 07:00$'
+exec roborock locks show
+stdout '^Off$'
+exec roborock lights show
+stdout '^On$'
+
 exec roborock rooms list
-stdout "\[1, '100', 1\]"
+stdout '^  1  Kitchen$'
+stdout '^  2  Bedroom$'
+exec roborock offpeak show
+stdout '^Off$'
+exec roborock history list
+stdout '^Cleaned 12 times, 50\.0 m² in 5 h 0 min$'
+exec roborock clean estimate
+stdout '^Time left: 1 h 5 min of 2 h 29 min$'
+exec roborock parts show
+stdout '^Main brush: 290 h left$'
 
 # A setting can be read, changed and read again
 exec roborock volume show
-stdout '^\[30\]$'
+stdout '^30%$'
 exec roborock volume set 40
+stdout '^Done\.$'
 vacuum await volume 40
 exec roborock volume show
-stdout '^\[40\]$'
+stdout '^40%$'
 
 # Plain words and numbers turn into what the robot expects
 exec roborock clean rooms 1,2

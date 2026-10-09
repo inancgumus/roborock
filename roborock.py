@@ -38,7 +38,7 @@ sys.path = [p for p in sys.path if p != str(Path(__file__).resolve().parent)]
 
 import keyring
 from platformdirs import user_config_dir, user_log_dir
-from roborock.data import UserData
+from roborock.data import Consumable, DnDTimer, StatusV2, UserData
 from roborock.data.v1.v1_code_mappings import RoborockErrorCode, RoborockStateCode
 from roborock.devices.device_manager import UserParams, create_device_manager
 from roborock.devices.rpc import v1_channel
@@ -423,11 +423,24 @@ async def request(command, params):
     return reply["result"]
 
 
-async def send(command, params):
+async def send(cmd, params):
     try:
-        print(await request(command, params))
+        print(cmd.view(await request(RoborockCommand(cmd.command), params)))
     except RuntimeError as err:
         fail(str(err))
+
+
+async def list_rooms():
+    try:
+        mapping = await request(RoborockCommand.GET_ROOM_MAPPING, None)
+    except RuntimeError as err:
+        fail(str(err))
+    saved = json.loads(keyring.get_password(*SESSION))
+    api = RoborockApiClient(saved["email"], base_url=API_URL)
+    rooms = await api.get_rooms(UserData.from_dict(saved["user_data"]))
+    names = {room.iot_id: room.name for room in rooms}
+    for number, iot_id, *_ in mapping:
+        print(f"{number:>3}  {names.get(str(iot_id), 'Unnamed room')}")
 
 
 def configure(name=None, state=None):
@@ -439,6 +452,108 @@ def configure(name=None, state=None):
     width = max(map(len, SETTINGS))
     for setting, text in SETTINGS.items():
         print(f"{setting:<{width}}  {'on' if settings[setting] else 'off':<3}  {text}")
+
+
+def words(name):
+    return str(name).replace("_", " ").capitalize()
+
+
+def unwrap(value):
+    """The answer inside the one-item list that robots wrap most answers in."""
+    return value[0] if isinstance(value, list) and len(value) == 1 else value
+
+
+def duration(seconds):
+    hours, minutes = divmod(seconds // 60, 60)
+    return f"{hours} h {minutes} min" if hours else f"{minutes} min"
+
+
+def square_meters(area):
+    return f"{area / 1_000_000:.1f} m²"
+
+
+def on_off_word(value):
+    return "On" if value else "Off"
+
+
+def inline(value):
+    if isinstance(value, dict):
+        return ", ".join(f"{words(key).lower()} {inline(item)}" for key, item in value.items())
+    if isinstance(value, list):
+        return ", ".join(map(inline, value))
+    return str(value)
+
+
+def plain(result):
+    """Any answer as short lines of text, for commands that have no view of their own."""
+    result = unwrap(result)
+    if result == "ok":
+        return "Done."
+    if isinstance(result, dict):
+        return "\n".join(f"{words(key)}: {inline(value)}" for key, value in result.items())
+    if isinstance(result, list):
+        return "\n".join(map(inline, result))
+    return str(result)
+
+
+def switch(result):
+    result = unwrap(result)
+    if isinstance(result, dict) and len(result) == 1:
+        result = next(iter(result.values()))
+    return on_off_word(result) if isinstance(result, int) else plain(result)
+
+
+def volume(result):
+    return f"{unwrap(result)}%"
+
+
+def show_status(result):
+    robot = StatusV2.from_dict(unwrap(result))
+    lines = [f"State: {words(robot.state.name)}", f"Battery: {robot.battery}%"]
+    lines.append(f"Error: {words(robot.error_code.name)}" if robot.error_code else "No errors")
+    lines.append(f"Last clean: {square_meters(robot.clean_area)} in {duration(robot.clean_time)}")
+    return "\n".join(lines)
+
+
+def quiet_hours(result):
+    timer = DnDTimer.from_dict(unwrap(result))
+    if not timer.enabled:
+        return "Off"
+    return f"On, from {timer.start_time:%H:%M} to {timer.end_time:%H:%M}"
+
+
+def estimate(result):
+    clean = unwrap(result)["clean_estimate"]
+    return "\n".join(
+        [
+            f"Time left: {duration(clean['remaining_time'])} of {duration(clean['total_time'])}",
+            f"Area left: {square_meters(clean['remaining_area'])}"
+            f" of {square_meters(clean['total_area'])}",
+        ]
+    )
+
+
+def history(result):
+    total_time, total_area, count, records = result
+    return "\n".join(
+        [
+            f"Cleaned {count} times, {square_meters(total_area)} in {duration(total_time)}",
+            "Records: " + ", ".join(map(str, records)),
+        ]
+    )
+
+
+def parts(result):
+    worn = Consumable.from_dict(unwrap(result))
+    left = {
+        "Main brush": worn.main_brush_time_left,
+        "Side brush": worn.side_brush_time_left,
+        "Filter": worn.filter_time_left,
+        "Sensors": worn.sensor_time_left,
+    }
+    return "\n".join(
+        f"{part}: {max(seconds, 0) // 3600} h left" for part, seconds in left.items() if seconds
+    )
 
 
 class Arg(NamedTuple):
@@ -457,6 +572,7 @@ class Cmd(NamedTuple):
     boxed: bool = False  # wrap the dict in a list
     fixed: object = None  # send this instead of arguments
     run: Callable | None = None  # called with the arguments instead of sending a command
+    view: Callable = plain  # turns the robot's answer into the text to print
 
 
 def on_off(text):
@@ -522,13 +638,14 @@ AREAS = {
                 "estimate",
                 "app_get_clean_estimate_info",
                 "Show the estimated time and area of this clean",
+                view=estimate,
             ),
         ],
     ),
     "rooms": (
         "Rooms",
         [
-            Cmd("list", "get_room_mapping", "List room numbers (the first number of each row)"),
+            Cmd("list", None, "List the rooms and their numbers", run=list_rooms),
             Cmd("order", "get_clean_sequence", "Show the order rooms are cleaned in"),
             Cmd("progress", "get_segment_status", "Show room cleaning progress"),
             Cmd("custom", "get_customize_clean_mode", "Show whether rooms use their own settings"),
@@ -549,8 +666,11 @@ AREAS = {
                 "tidy",
                 "get_map_beautification_status",
                 "Show whether map cleanup is on",
+                view=switch,
             ),
-            Cmd("offline", "get_offline_map_status", "Show whether offline maps are on"),
+            Cmd(
+                "offline", "get_offline_map_status", "Show whether offline maps are on", view=switch
+            ),
         ],
     ),
     "suction": (
@@ -580,6 +700,7 @@ AREAS = {
                 "deep",
                 "app_get_carpet_deep_clean_status",
                 "Show whether carpet deep clean is on",
+                view=switch,
             ),
         ],
     ),
@@ -591,21 +712,25 @@ AREAS = {
                 "dirt",
                 "get_dirty_object_detect_status",
                 "Show whether dirty object detection is on",
+                view=switch,
             ),
             Cmd(
                 "furniture",
                 "get_identify_furniture_status",
                 "Show whether furniture detection is on",
+                view=switch,
             ),
             Cmd(
                 "gaps",
                 "get_gap_deep_clean_status",
                 "Show whether gap deep clean is on",
+                view=switch,
             ),
             Cmd(
                 "pets",
                 "get_pet_supplies_deep_clean_status",
                 "Show whether pet supplies deep clean is on",
+                view=switch,
             ),
         ],
     ),
@@ -616,6 +741,7 @@ AREAS = {
                 "detect",
                 "get_identify_ground_material_status",
                 "Show whether floor type detection is on",
+                view=switch,
             ),
             Cmd(
                 "adapt",
@@ -664,6 +790,7 @@ AREAS = {
                 "auto",
                 "get_dust_collection_switch_status",
                 "Show whether auto-empty is on",
+                view=switch,
             ),
         ],
     ),
@@ -674,6 +801,7 @@ AREAS = {
                 "show",
                 "get_status",
                 "Show the robot's state, battery, errors and settings",
+                view=show_status,
             ),
             Cmd("serial", "get_serial_number", "Show the serial number"),
             Cmd("features", "get_fw_features", "Show the firmware feature list"),
@@ -699,6 +827,7 @@ AREAS = {
                 "list",
                 "get_clean_summary",
                 "Show total cleaning time, area, count and record ids",
+                view=history,
             ),
             Cmd(
                 "show",
@@ -711,7 +840,7 @@ AREAS = {
     "parts": (
         "Brushes and filters",
         [
-            Cmd("show", "get_consumable", "Show how worn the brushes and filter are"),
+            Cmd("show", "get_consumable", "Show how worn the brushes and filter are", view=parts),
             Cmd(
                 "reset",
                 "reset_consumable",
@@ -733,14 +862,15 @@ AREAS = {
                 "extend",
                 "get_right_brush_stretch_status",
                 "Show whether the side brush extends",
+                view=switch,
             ),
-            Cmd("tag", "get_stretch_tag_status", "Show the stretch tag setting"),
+            Cmd("tag", "get_stretch_tag_status", "Show the stretch tag setting", view=switch),
         ],
     ),
     "volume": (
         "Voice volume",
         [
-            Cmd("show", "get_sound_volume", "Show the voice volume"),
+            Cmd("show", "get_sound_volume", "Show the voice volume", view=volume),
             Cmd(
                 "set",
                 "change_sound_volume",
@@ -759,19 +889,20 @@ AREAS = {
     "lights": (
         "Lights",
         [
-            Cmd("show", "get_led_status", "Show whether the status light is on"),
+            Cmd("show", "get_led_status", "Show whether the status light is on", view=switch),
             Cmd("set", "set_led_status", "Turn the status light on or off", (STATE,)),
             Cmd(
                 "mic",
                 "get_ap_mic_led_status",
                 "Show whether the microphone light is on",
+                view=switch,
             ),
         ],
     ),
     "locks": (
         "Child lock",
         [
-            Cmd("show", "get_child_lock_status", "Show whether the child lock is on"),
+            Cmd("show", "get_child_lock_status", "Show whether the child lock is on", view=switch),
             Cmd(
                 "set",
                 "set_child_lock_status",
@@ -784,7 +915,7 @@ AREAS = {
     "quiet": (
         "Quiet hours",
         [
-            Cmd("show", "get_dnd_timer", "Show the hours the robot stays silent"),
+            Cmd("show", "get_dnd_timer", "Show the hours the robot stays silent", view=quiet_hours),
             Cmd("set", "set_dnd_timer", "Set the hours the robot stays silent", (FROM, UNTIL)),
             Cmd("off", "close_dnd_timer", "Turn quiet hours off"),
         ],
@@ -796,6 +927,7 @@ AREAS = {
                 "show",
                 "get_valley_electricity_timer",
                 "Show the off-peak charging hours",
+                view=quiet_hours,
             ),
             Cmd(
                 "set",
@@ -836,7 +968,7 @@ AREAS = {
     "camera": (
         "Camera",
         [
-            Cmd("show", "get_camera_status", "Show whether the camera is on"),
+            Cmd("show", "get_camera_status", "Show whether the camera is on", view=switch),
         ],
     ),
     "config": (
@@ -890,7 +1022,7 @@ def main():
             return
         values = [getattr(args, arg.name) for arg in cmd.args]
         if cmd.run is None:
-            asyncio.run(send(RoborockCommand(cmd.command), payload(cmd, values)))
+            asyncio.run(send(cmd, payload(cmd, values)))
         elif inspect.iscoroutinefunction(cmd.run):
             asyncio.run(cmd.run(*values))
         else:

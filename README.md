@@ -37,6 +37,7 @@ Commands are `<area> <verb>`.
 
 - Run an area alone to list its commands, like `./roborock.py clean`.
 - Add `-h` to a command to see what it needs.
+- Answers are plain text, like `Battery: 87%`.
 
 | Command | What it does |
 | --- | --- |
@@ -48,7 +49,7 @@ Commands are `<area> <verb>`.
 | `./roborock.py charge` | Go back to the dock |
 | `./roborock.py clean spot` | Clean a small area around the robot |
 | `./roborock.py status show` | Show the robot's state, battery and errors |
-| `./roborock.py rooms list` | List room numbers |
+| `./roborock.py rooms list` | List the rooms and their numbers |
 | `./roborock.py drying start` | Dry the mop |
 | `./roborock.py parts show` | Show how worn the brushes and filter are |
 
