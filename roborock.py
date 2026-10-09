@@ -79,7 +79,7 @@ def fail(text):
 
 
 def say(text):
-    print(bold(text), flush=True)
+    print(text, flush=True)
 
 
 @contextlib.asynccontextmanager
@@ -94,7 +94,7 @@ async def sweeping(text):
         for step in itertools.count():
             sweep = step % width
             print(
-                f"\r\033[K{'  ' * sweep}🧹{'· ' * (width - sweep - 1)} {bold(text)}",
+                f"\r\033[K{'  ' * sweep}🧹{'· ' * (width - sweep - 1)} {text}",
                 end="",
                 flush=True,
             )
@@ -293,7 +293,7 @@ async def serve():
             fail(f"Cannot listen on port {PORT}: {err}")
         keyring.set_password(*SERVER, secret)
         say(f"🎉 Ready! Serving {vacuum.name}. Leave this running.")
-        say("In another terminal, run ./roborock.py <command>, like ./roborock.py find.")
+        say(bold("In another terminal, run ./roborock.py <command>, like ./roborock.py find."))
         if load_config()["bumper"]:
             say('It resumes the clean on its own when the robot reports "bumper stuck".')
         watcher = asyncio.create_task(watch(command.send))
