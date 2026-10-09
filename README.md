@@ -29,6 +29,10 @@ Start the server automatically whenever you log in:
 
 Run `./roborock.py` once first, so it can log in with your emailed code.
 
+The service runs the script with `uv`, which installs its packages.
+
+Your system may list it as `uv` in its startup items.
+
 Undo it with `./roborock.py uninstall`.
 
 ## Commands
