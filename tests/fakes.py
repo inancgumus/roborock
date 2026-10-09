@@ -247,6 +247,7 @@ class Vacuum:
     broker_port: int
     state: dict = field(default_factory=fresh_state)
     requests: list = field(default_factory=list)  # (method, params) of every request, in order
+    dropped: dict = field(default_factory=dict)  # method -> how many requests to ignore
     subscribed: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def start(self):
@@ -268,6 +269,9 @@ class Vacuum:
                     request = json.loads(json.loads(incoming.payload)["dps"]["101"])
                     method, params = request["method"], request.get("params")
                     self.requests.append((method, params))
+                    if self.dropped.get(method):
+                        self.dropped[method] -= 1
+                        continue
                     reply = {"id": request["id"], "result": self.answer(method, params)}
                     payload = {"dps": {"102": json.dumps(reply)}, "t": int(time.time())}
                     outgoing = RoborockMessage(

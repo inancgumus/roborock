@@ -14,6 +14,7 @@ Usage:
 import argparse
 import asyncio
 import contextlib
+import functools
 import hmac
 import inspect
 import itertools
@@ -40,7 +41,9 @@ from platformdirs import user_config_dir, user_log_dir
 from roborock.data import UserData
 from roborock.data.v1.v1_code_mappings import RoborockErrorCode, RoborockStateCode
 from roborock.devices.device_manager import UserParams, create_device_manager
+from roborock.devices.rpc import v1_channel
 from roborock.devices.traits.v1.consumeable import ConsumableAttribute
+from roborock.exceptions import RoborockException, RoborockUnsupportedFeature
 from roborock.roborock_typing import RoborockCommand
 from roborock.web_api import RoborockApiClient
 
@@ -53,9 +56,15 @@ SERVER = ("roborock", "server")  # the keychain entry holding the server's secre
 HOST = "127.0.0.1"  # the server only listens on this computer
 PORT = int(os.environ.get("ROBORROCK_PORT", 47651))
 API_URL = os.environ.get("ROBORROCK_API_URL")  # replaces Roborock's own servers, for testing
+TIMEOUT = float(os.environ.get("ROBORROCK_TIMEOUT", 3))  # seconds to wait for one answer
+CONNECT_WAIT = 30  # seconds to wait for the connection before serving anyway
+ATTEMPTS = 5  # a sleeping robot misses the first messages, so a request is sent again
 NO_SERVER = (
     "No server is running. Start one in another terminal with ./roborock.py, then try again."
 )
+
+# The library waits 10 seconds for each answer, which is too long to wait for a lost message
+v1_channel._TIMEOUT = TIMEOUT
 
 # Plain app_start would restart a room or zone clean from scratch
 RESUME_COMMANDS = {
@@ -146,6 +155,32 @@ async def resume_if_stuck(call):
     say(f"{time.strftime('%H:%M:%S')} Bumper stuck. Resumed the clean.")
 
 
+def explain(err):
+    """What went wrong, in words a person can act on."""
+    text = str(err) or type(err).__name__
+    if "timed out" in text:
+        return "The robot did not answer. Check that it is on and connected to Wi-Fi."
+    if "not connected" in text:
+        return "The connection to the Roborock cloud dropped. Reconnecting."
+    if "not recognized by the device" in text:
+        return "This robot does not support that command."
+    return text.rstrip(".") + "."
+
+
+async def ask(command, method, params=None):
+    """Send a request to the robot again when it does not answer."""
+    for attempt in range(1, ATTEMPTS + 1):
+        try:
+            return await command.send(method, params)
+        except RoborockUnsupportedFeature:
+            raise  # the robot answered: it lacks this command
+        except RoborockException as err:
+            logging.warning("%s failed (try %d of %d): %s", method.value, attempt, ATTEMPTS, err)
+            failure = err
+            await asyncio.sleep(1)  # a dropped connection fails at once, so give it time to return
+    raise failure
+
+
 def load_config():
     try:
         saved = json.loads(CONFIG_FILE.read_text())
@@ -161,10 +196,10 @@ async def watch(call):
             if load_config()["bumper"]:
                 await resume_if_stuck(call)
             failing = False
-        except Exception:
-            logging.exception("Could not check the robot")
+        except Exception as err:
+            logging.warning("Could not check the robot: %s", err)
             if not failing:
-                error("Could not check the robot. Still trying. The log has the details.")
+                error(f"Could not check the robot. {explain(err)} Still trying.")
             failing = True
         await asyncio.sleep(1)
 
@@ -178,6 +213,11 @@ async def connect():
     try:
         async with sweeping("Looking for your vacuum"):
             vacuum = next(d for d in await manager.get_devices() if d.v1_properties)
+        async with sweeping("Waiting for the connection to your robot"):
+            with contextlib.suppress(TimeoutError):  # the watcher reports what is still wrong
+                async with asyncio.timeout(CONNECT_WAIT):
+                    while not vacuum.is_connected:
+                        await asyncio.sleep(0.2)
         yield vacuum
     finally:
         await manager.close()
@@ -250,7 +290,7 @@ def build_parser():
     return parser
 
 
-def handler(command, secret):
+def handler(robot, secret):
     """Answers one request from a command, as one line of JSON in and one line out."""
 
     async def handle(reader, writer):
@@ -258,12 +298,12 @@ def handler(command, secret):
             message = json.loads(await reader.readline())
             if not hmac.compare_digest(message["secret"], secret):
                 raise PermissionError("wrong secret")
-            result = await command.send(RoborockCommand(message["command"]), message["params"])
+            result = await robot(RoborockCommand(message["command"]), message["params"])
             reply = {"result": result}
             logging.info("Ran %s", message["command"])
         except Exception as err:
             logging.warning("Command failed: %s", err)
-            reply = {"error": f"{type(err).__name__}: {err}"}
+            reply = {"error": explain(err)}
         with contextlib.suppress(ConnectionError):  # the client left before the reply
             writer.write(json.dumps(reply, default=str).encode() + b"\n")
             await writer.drain()
@@ -284,11 +324,11 @@ async def serve():
     if keyring.get_password(*SESSION) is None:
         await login(input(bold("Roborock email: ")).strip())
     async with connect() as vacuum:
-        command = vacuum.v1_properties.command
+        robot = functools.partial(ask, vacuum.v1_properties.command)
         # Keeps other programs on this computer from sending commands
         secret = secrets.token_hex(16)
         try:
-            server = await asyncio.start_server(handler(command, secret), HOST, PORT)
+            server = await asyncio.start_server(handler(robot, secret), HOST, PORT)
         except OSError as err:
             fail(f"Cannot listen on port {PORT}: {err}")
         keyring.set_password(*SERVER, secret)
@@ -296,7 +336,7 @@ async def serve():
         say(bold("In another terminal, run ./roborock.py <command>, like ./roborock.py find."))
         if load_config()["bumper"]:
             say('It resumes the clean on its own when the robot reports "bumper stuck".')
-        watcher = asyncio.create_task(watch(command.send))
+        watcher = asyncio.create_task(watch(robot))
         try:
             async with server:
                 await server.serve_forever()
@@ -505,7 +545,11 @@ AREAS = {
                 (Arg("map", int, "Map number, listed by: maps list"),),
             ),
             Cmd("status", "get_map_status", "Show the current map state"),
-            Cmd("tidy", "get_map_beautification_status", "Show whether map cleanup is on"),
+            Cmd(
+                "tidy",
+                "get_map_beautification_status",
+                "Show whether map cleanup is on",
+            ),
             Cmd("offline", "get_offline_map_status", "Show whether offline maps are on"),
         ],
     ),
@@ -532,7 +576,11 @@ AREAS = {
         [
             Cmd("boost", "get_carpet_mode", "Show the carpet boost setting"),
             Cmd("mode", "get_carpet_clean_mode", "Show how carpets are cleaned"),
-            Cmd("deep", "app_get_carpet_deep_clean_status", "Show whether carpet deep clean is on"),
+            Cmd(
+                "deep",
+                "app_get_carpet_deep_clean_status",
+                "Show whether carpet deep clean is on",
+            ),
         ],
     ),
     "obstacles": (
@@ -549,7 +597,11 @@ AREAS = {
                 "get_identify_furniture_status",
                 "Show whether furniture detection is on",
             ),
-            Cmd("gaps", "get_gap_deep_clean_status", "Show whether gap deep clean is on"),
+            Cmd(
+                "gaps",
+                "get_gap_deep_clean_status",
+                "Show whether gap deep clean is on",
+            ),
             Cmd(
                 "pets",
                 "get_pet_supplies_deep_clean_status",
@@ -608,13 +660,21 @@ AREAS = {
             Cmd("start", "app_start_collect_dust", "Empty the bin into the dock"),
             Cmd("stop", "app_stop_collect_dust", "Stop emptying the bin"),
             Cmd("mode", "get_dust_collection_mode", "Show how often the dock empties the bin"),
-            Cmd("auto", "get_dust_collection_switch_status", "Show whether auto-empty is on"),
+            Cmd(
+                "auto",
+                "get_dust_collection_switch_status",
+                "Show whether auto-empty is on",
+            ),
         ],
     ),
     "status": (
         "Robot status",
         [
-            Cmd("show", "get_status", "Show the robot's state, battery, errors and settings"),
+            Cmd(
+                "show",
+                "get_status",
+                "Show the robot's state, battery, errors and settings",
+            ),
             Cmd("serial", "get_serial_number", "Show the serial number"),
             Cmd("features", "get_fw_features", "Show the firmware feature list"),
             Cmd("support", "app_get_init_status", "Show what the robot supports"),
@@ -636,7 +696,9 @@ AREAS = {
         "Cleaning history",
         [
             Cmd(
-                "list", "get_clean_summary", "Show total cleaning time, area, count and record ids"
+                "list",
+                "get_clean_summary",
+                "Show total cleaning time, area, count and record ids",
             ),
             Cmd(
                 "show",
@@ -667,7 +729,11 @@ AREAS = {
     "brushes": (
         "Side brush",
         [
-            Cmd("extend", "get_right_brush_stretch_status", "Show whether the side brush extends"),
+            Cmd(
+                "extend",
+                "get_right_brush_stretch_status",
+                "Show whether the side brush extends",
+            ),
             Cmd("tag", "get_stretch_tag_status", "Show the stretch tag setting"),
         ],
     ),
@@ -695,7 +761,11 @@ AREAS = {
         [
             Cmd("show", "get_led_status", "Show whether the status light is on"),
             Cmd("set", "set_led_status", "Turn the status light on or off", (STATE,)),
-            Cmd("mic", "get_ap_mic_led_status", "Show whether the microphone light is on"),
+            Cmd(
+                "mic",
+                "get_ap_mic_led_status",
+                "Show whether the microphone light is on",
+            ),
         ],
     ),
     "locks": (
@@ -722,7 +792,11 @@ AREAS = {
     "offpeak": (
         "Off-peak charging",
         [
-            Cmd("show", "get_valley_electricity_timer", "Show the off-peak charging hours"),
+            Cmd(
+                "show",
+                "get_valley_electricity_timer",
+                "Show the off-peak charging hours",
+            ),
             Cmd(
                 "set",
                 "set_valley_electricity_timer",

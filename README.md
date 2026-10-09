@@ -66,6 +66,12 @@ Settings are on by default. Turn one off or on again with `config set`:
 ./roborock.py config set bumper on
 ```
 
+## When the robot does not answer
+
+Robots sometimes miss a message. The server asks again a few times before it gives up.
+
+Then it tells you what went wrong, and the log has the details.
+
 ## Logs
 
 Logs go to a file in your user log folder, not to the terminal.

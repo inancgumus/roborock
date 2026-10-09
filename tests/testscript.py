@@ -16,6 +16,7 @@ A script is a list of commands followed by files, each introduced by a line like
     vacuum await KEY VALUE        wait until the robot's state has that value
     vacuum sent METHOD [JSON]     the robot received that request (with those params)
     vacuum clear                  forget the requests so far
+    vacuum drop METHOD COUNT      ignore the next COUNT requests for METHOD, like a lost message
     cloud asked EMAIL             the fake cloud was asked to email a code to EMAIL
 
 A leading `!` flips any command. A leading `[darwin]` or `[linux]` runs it on that system only.
@@ -147,6 +148,7 @@ class Script:
             WORK=str(self.work),
             NO_COLOR="1",
             ROBORROCK_PORT=str(port),
+            ROBORROCK_TIMEOUT="2",
             ROBORROCK_API_URL=self.world.cloud.url,
             PYTHON_KEYRING_BACKEND="fake_keyring.FileKeyring",
             PYTHONPATH=str(HERE),
@@ -293,6 +295,10 @@ class Script:
         requests = self.world.vacuum.requests
         seen = [p for m, p in requests if m == method and (not params or params == [p])]
         self.check(negate, seen, f"the robot did not get {method} {args[1:]}; it got {requests}")
+
+    def cmd_vacuum_drop(self, negate, args):
+        method, count = args
+        self.world.vacuum.dropped[method] = int(count)
 
     def cmd_vacuum_clear(self, negate, args):
         self.world.vacuum.requests.clear()

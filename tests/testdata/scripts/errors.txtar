@@ -27,4 +27,20 @@ stderr "unknown command 'nope'"
 
 # A method this robot lacks is reported as an error
 ! exec roborock schedules list
-stderr 'not recognized by the device'
+stderr 'does not support that command'
+
+# A lost message is sent again
+vacuum drop get_sound_volume 2
+exec roborock volume show
+stdout '30'
+
+# A robot that stays silent is reported in plain words
+vacuum drop get_sound_volume 5
+! exec roborock volume show
+stderr 'The robot did not answer'
+! stderr 'RoborockException'
+
+# The server says why it cannot check the robot
+vacuum drop get_status 5
+# After repeated silence the library restarts its connection, so the reason may be either
+await 'Could not check the robot\. (The robot did not answer|The connection to the Roborock cloud dropped)'
