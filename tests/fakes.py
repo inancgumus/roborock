@@ -232,6 +232,8 @@ def fresh_state():
         "clean_time": 100,
         "clean_area": 1000,
         "volume": 30,
+        "suction": 104,
+        "avoidance": 1,
         "lock_status": 0,
         "led": 1,
         "dnd": [22, 0, 7, 0],
@@ -277,7 +279,9 @@ class Vacuum:
                     if self.dropped.get(method):
                         self.dropped[method] -= 1
                         continue
-                    reply = {"id": request["id"], "result": self.answer(method, params)}
+                    result = self.answer(method, params)
+                    refused = isinstance(result, dict) and "code" in result
+                    reply = {"id": request["id"], "error" if refused else "result": result}
                     payload = {"dps": {"102": json.dumps(reply)}, "t": int(time.time())}
                     outgoing = RoborockMessage(
                         protocol=RoborockMessageProtocol.RPC_RESPONSE,
@@ -332,6 +336,21 @@ class Vacuum:
     def do_change_sound_volume(self, params):
         return self.update(volume=params[0])
 
+    def do_get_custom_mode(self, params):
+        return [self.state["suction"]]
+
+    def do_set_custom_mode(self, params):
+        return self.update(suction=params[0])
+
+    def do_get_collision_avoid_status(self, params):
+        return {"status": self.state["avoidance"]}
+
+    def do_set_collision_avoid_status(self, params):
+        return self.update(avoidance=params["status"])
+
+    def do_set_dirty_object_detect_status(self, params):
+        return {"code": -10007, "message": "invalid status"}  # as the robot does during a clean
+
     def do_get_child_lock_status(self, params):
         return [{"lock_status": self.state["lock_status"]}]
 
@@ -363,7 +382,10 @@ class Vacuum:
         return [{"start_hour": 0, "start_minute": 0, "end_hour": 0, "end_minute": 0, "enabled": 0}]
 
     def do_get_clean_summary(self, params):
-        return [18000, 50_000_000, 12, [1, 2]]
+        return {"clean_time": 18000, "clean_area": 50_000_000, "clean_count": 12, "records": [1, 2]}
+
+    def do_get_timer(self, params):
+        return []
 
     def do_app_get_clean_estimate_info(self, params):
         return {

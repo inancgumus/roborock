@@ -42,6 +42,7 @@ from roborock.data import Consumable, DnDTimer, StatusV2, UserData
 from roborock.data.v1.v1_code_mappings import RoborockErrorCode, RoborockStateCode
 from roborock.devices.device_manager import UserParams, create_device_manager
 from roborock.devices.rpc import v1_channel
+from roborock.devices.traits.v1.clean_summary import CleanSummaryConverter
 from roborock.devices.traits.v1.consumeable import ConsumableAttribute
 from roborock.exceptions import RoborockException, RoborockUnsupportedFeature
 from roborock.roborock_typing import RoborockCommand
@@ -150,8 +151,14 @@ async def resume_if_stuck(call):
     if status["error_code"] != RoborockErrorCode.bumper_stuck:
         return
     await call(RoborockCommand.RESOLVE_ERROR, {"error_code": status["error_code"]})
-    if status["state"] in (RoborockStateCode.paused, RoborockStateCode.error):
-        await resume(call, status)
+    stopped = (
+        RoborockStateCode.paused,
+        RoborockStateCode.error,
+        RoborockStateCode.charger_disconnected,
+    )
+    if status["state"] not in stopped:
+        return
+    await resume(call, status)
     say(f"{time.strftime('%H:%M:%S')} Bumper stuck. Resumed the clean.")
 
 
@@ -164,6 +171,8 @@ def explain(err):
         return "The connection to the Roborock cloud dropped. Reconnecting."
     if "not recognized by the device" in text:
         return "This robot does not support that command."
+    if "invalid status" in text:
+        return "The robot refused the change for now. It may be in the middle of a clean."
     return text.rstrip(".") + "."
 
 
@@ -489,6 +498,8 @@ def plain(result):
     result = unwrap(result)
     if result == "ok":
         return "Done."
+    if result in ([], {}, None):
+        return "None."
     if isinstance(result, dict):
         return "\n".join(f"{words(key)}: {inline(value)}" for key, value in result.items())
     if isinstance(result, list):
@@ -496,11 +507,66 @@ def plain(result):
     return str(result)
 
 
-def switch(result):
+def value(result):
+    """The setting in an answer like 104, [104] or [{"status": 1}], which comes first."""
     result = unwrap(result)
-    if isinstance(result, dict) and len(result) == 1:
-        result = next(iter(result.values()))
-    return on_off_word(result) if isinstance(result, int) else plain(result)
+    return next(iter(result.values())) if isinstance(result, dict) and result else result
+
+
+def switch(result):
+    setting = value(result)
+    return on_off_word(setting) if isinstance(setting, int) else plain(result)
+
+
+def name(names, code):
+    return names[code].capitalize() if code in names else f"Unknown ({code})"
+
+
+def labeled(names):
+    """A view that prints the word for the robot's code, from {code: word}."""
+    return lambda result: name(names, value(result))
+
+
+def motor(result):
+    modes = unwrap(result)
+    return "\n".join(
+        [
+            f"Suction: {name(SUCTION, modes['fan_power'])}",
+            f"Water: {name(WATER, modes['water_box_mode'])}",
+            f"Mop route: {name(ROUTE, modes['mop_mode'])}",
+        ]
+    )
+
+
+def room_modes(result):
+    return "\n".join(
+        f"Room {room['segment']}: suction {name(SUCTION, room['fan_power'])},"
+        f" water {name(WATER, room['water_box_mode'])}, mop route {name(ROUTE, room['mop_mode'])},"
+        f" {room['repeat']} {'pass' if room['repeat'] == 1 else 'passes'}"
+        for room in result
+    )
+
+
+def floor_maps(result):
+    lines = []
+    for floor in unwrap(result)["map_info"]:
+        rooms = ", ".join(room["iot_name"] for room in floor.get("rooms", []))
+        lines.append(f"{floor['mapFlag']:>3}  {floor['name']}: {rooms or 'no rooms'}")
+    return "\n".join(lines)
+
+
+def smart_wash(result):
+    wash = unwrap(result)
+    if not wash["smart_wash"]:
+        return "Off"
+    return f"On, every {duration(wash['wash_interval'])} of cleaning"
+
+
+def dryer(result):
+    setting = unwrap(result)
+    if not setting["status"]:
+        return "Off"
+    return f"On, dries for {duration(setting['on']['dry_time'])}"
 
 
 def volume(result):
@@ -534,11 +600,12 @@ def estimate(result):
 
 
 def history(result):
-    total_time, total_area, count, records = result
+    summary = CleanSummaryConverter().convert(result)  # robots send a list or a dict
+    area, time_spent = square_meters(summary.clean_area), duration(summary.clean_time)
     return "\n".join(
         [
-            f"Cleaned {count} times, {square_meters(total_area)} in {duration(total_time)}",
-            "Records: " + ", ".join(map(str, records)),
+            f"Cleaned {summary.clean_count} times, {area} in {time_spent}",
+            "Records: " + ", ".join(map(str, summary.records or [])),
         ]
     )
 
@@ -572,6 +639,7 @@ class Cmd(NamedTuple):
     boxed: bool = False  # wrap the dict in a list
     fixed: object = None  # send this instead of arguments
     run: Callable | None = None  # called with the arguments instead of sending a command
+    setter: str | None = None  # sent instead of command when the last argument is given
     view: Callable = plain  # turns the robot's answer into the text to print
 
 
@@ -610,7 +678,37 @@ def choice(*options):
     return parse
 
 
+def named(names):
+    """Parses a word into the robot's code for it, from {code: word}."""
+    codes = {word: code for code, word in names.items()}
+    pick = choice(*codes)
+    return lambda text: codes[pick(text)]
+
+
+def pick(label, names, default=None):
+    return Arg(label, named(names), "One of: " + ", ".join(names.values()), default)
+
+
+SUCTION = {101: "quiet", 102: "balanced", 103: "turbo", 104: "max", 105: "off", 108: "max+"}
+WATER = {
+    200: "off",
+    221: "slight",
+    225: "low",
+    230: "gentle",
+    235: "medium",
+    240: "moderate",
+    245: "high",
+    250: "extreme",
+}
+ROUTE = {300: "standard", 301: "deep", 303: "deep+", 304: "fast"}
+CARPET = {0: "avoid", 1: "lift", 2: "ignore"}
+WASH = {0: "light", 1: "balanced", 2: "deep", 8: "super-deep", 10: "smart"}
+TEMPERATURE = {0: "normal", 1: "warm", 2: "hot"}
+DUST = {0: "smart", 1: "light", 2: "balanced", 4: "max"}
+
+KEEP = ...  # an optional argument left out, so the command shows the setting
 STATE = Arg("on|off", on_off, "Turn it on or off")
+CHANGE = Arg("on|off", on_off, "Turn it on or off", KEEP)
 FROM = Arg("from", clock, "Start time, like 22:00")
 UNTIL = Arg("until", clock, "End time, like 08:00")
 
@@ -648,13 +746,18 @@ AREAS = {
             Cmd("list", None, "List the rooms and their numbers", run=list_rooms),
             Cmd("order", "get_clean_sequence", "Show the order rooms are cleaned in"),
             Cmd("progress", "get_segment_status", "Show room cleaning progress"),
-            Cmd("custom", "get_customize_clean_mode", "Show whether rooms use their own settings"),
+            Cmd(
+                "custom",
+                "get_customize_clean_mode",
+                "Show the settings each room cleans with",
+                view=room_modes,
+            ),
         ],
     ),
     "maps": (
         "Floor maps",
         [
-            Cmd("list", "get_multi_maps_list", "List the saved floor maps"),
+            Cmd("list", "get_multi_maps_list", "List the saved floor maps", view=floor_maps),
             Cmd(
                 "load",
                 "load_multi_map",
@@ -676,61 +779,100 @@ AREAS = {
     "suction": (
         "Suction power",
         [
-            Cmd("show", "get_custom_mode", "Show the suction power"),
+            Cmd("show", "get_custom_mode", "Show the suction power", view=labeled(SUCTION)),
+            Cmd("set", "set_custom_mode", "Set the suction power", (pick("power", SUCTION),)),
         ],
     ),
     "water": (
         "Water flow",
         [
-            Cmd("show", "get_water_box_custom_mode", "Show the water flow level"),
+            Cmd("show", "get_water_box_custom_mode", "Show the water flow", view=labeled(WATER)),
+            Cmd("set", "set_water_box_custom_mode", "Set the water flow", (pick("flow", WATER),)),
         ],
     ),
     "mode": (
         "Cleaning mode",
         [
-            Cmd("show", "get_clean_motor_mode", "Show suction, water and mop route together"),
+            Cmd(
+                "show",
+                "get_clean_motor_mode",
+                "Show suction, water and mop route together",
+                view=motor,
+            ),
+            Cmd("route", "set_mop_mode", "Set the mop route", (pick("route", ROUTE),)),
         ],
     ),
     "carpet": (
         "Carpets",
         [
-            Cmd("boost", "get_carpet_mode", "Show the carpet boost setting"),
-            Cmd("mode", "get_carpet_clean_mode", "Show how carpets are cleaned"),
+            Cmd("boost", "get_carpet_mode", "Show whether carpet boost is on", view=switch),
+            Cmd(
+                "mode",
+                "get_carpet_clean_mode",
+                "Show or change what the mop does on carpets",
+                (pick("mode", CARPET, KEEP),),
+                ("carpet_clean_mode",),
+                view=labeled(CARPET),
+                setter="set_carpet_clean_mode",
+            ),
             Cmd(
                 "deep",
                 "app_get_carpet_deep_clean_status",
-                "Show whether carpet deep clean is on",
+                "Show or turn carpet deep clean on or off",
+                (CHANGE,),
+                ("status",),
                 view=switch,
+                setter="app_set_carpet_deep_clean_status",
             ),
         ],
     ),
     "obstacles": (
         "Obstacles",
         [
-            Cmd("avoidance", "get_collision_avoid_status", "Show the obstacle avoidance setting"),
+            Cmd(
+                "avoidance",
+                "get_collision_avoid_status",
+                "Show or turn obstacle avoidance on or off",
+                (CHANGE,),
+                ("status",),
+                view=switch,
+                setter="set_collision_avoid_status",
+            ),
             Cmd(
                 "dirt",
                 "get_dirty_object_detect_status",
-                "Show whether dirty object detection is on",
+                "Show or turn dirty object detection on or off",
+                (CHANGE,),
+                ("status",),
                 view=switch,
+                setter="set_dirty_object_detect_status",
             ),
             Cmd(
                 "furniture",
                 "get_identify_furniture_status",
-                "Show whether furniture detection is on",
+                "Show or turn furniture detection on or off",
+                (CHANGE,),
+                ("status",),
                 view=switch,
+                setter="set_identify_furniture_status",
             ),
             Cmd(
                 "gaps",
                 "get_gap_deep_clean_status",
-                "Show whether gap deep clean is on",
+                "Show or turn gap deep clean on or off",
+                (CHANGE,),
+                ("status",),
                 view=switch,
+                setter="set_gap_deep_clean_status",
             ),
             Cmd(
                 "pets",
                 "get_pet_supplies_deep_clean_status",
-                "Show whether pet supplies deep clean is on",
+                "Show or turn pet supplies deep clean on or off",
+                (CHANGE,),
+                ("status",),
                 view=switch,
+                setter="set_pet_supplies_deep_clean_status",
             ),
         ],
     ),
@@ -740,13 +882,20 @@ AREAS = {
             Cmd(
                 "detect",
                 "get_identify_ground_material_status",
-                "Show whether floor type detection is on",
+                "Show or turn floor type detection on or off",
+                (CHANGE,),
+                ("status",),
                 view=switch,
+                setter="set_identify_ground_material_status",
             ),
             Cmd(
                 "adapt",
                 "get_clean_follow_ground_material_status",
-                "Show whether cleaning adapts to the floor type",
+                "Show or turn cleaning that adapts to the floor type on or off",
+                (CHANGE,),
+                ("status",),
+                view=switch,
+                setter="set_clean_follow_ground_material_status",
             ),
         ],
     ),
@@ -755,11 +904,38 @@ AREAS = {
         [
             Cmd("start", "app_start_wash", "Wash the mop at the dock"),
             Cmd("stop", "app_stop_wash", "Stop washing the mop"),
-            Cmd("mode", "get_wash_towel_mode", "Show the mop wash mode"),
-            Cmd("smart", "get_smart_wash_params", "Show the smart mop wash settings"),
-            Cmd("temperature", "get_wash_water_temperature", "Show the mop wash water temperature"),
             Cmd(
-                "fluid", "get_auto_delivery_cleaning_fluid", "Show the auto cleaning fluid setting"
+                "mode",
+                "get_wash_towel_mode",
+                "Show or change how hard the dock washes the mop",
+                (pick("mode", WASH, KEEP),),
+                ("wash_mode",),
+                view=labeled(WASH),
+                setter="set_wash_towel_mode",
+            ),
+            Cmd(
+                "smart",
+                "get_smart_wash_params",
+                "Show how often the mop is washed",
+                view=smart_wash,
+            ),
+            Cmd(
+                "temperature",
+                "get_wash_water_temperature",
+                "Show or change the mop wash water temperature",
+                (pick("temperature", TEMPERATURE, KEEP),),
+                ("values",),
+                view=labeled(TEMPERATURE),
+                setter="set_wash_water_temperature",
+            ),
+            Cmd(
+                "fluid",
+                "get_auto_delivery_cleaning_fluid",
+                "Show or turn the auto cleaning fluid on or off",
+                (CHANGE,),
+                ("status",),
+                view=switch,
+                setter="set_auto_delivery_cleaning_fluid",
             ),
         ],
     ),
@@ -769,7 +945,10 @@ AREAS = {
             Cmd("start", "app_set_dryer_status", "Dry the mop now", fixed={"status": 1}),
             Cmd("stop", "app_set_dryer_status", "Stop drying the mop", fixed={"status": 0}),
             Cmd(
-                "show", "app_get_dryer_setting", "Show whether the dock dries the mop after a clean"
+                "show",
+                "app_get_dryer_setting",
+                "Show whether the dock dries the mop after a clean",
+                view=dryer,
             ),
             Cmd(
                 "set",
@@ -785,7 +964,15 @@ AREAS = {
         [
             Cmd("start", "app_start_collect_dust", "Empty the bin into the dock"),
             Cmd("stop", "app_stop_collect_dust", "Stop emptying the bin"),
-            Cmd("mode", "get_dust_collection_mode", "Show how often the dock empties the bin"),
+            Cmd(
+                "mode",
+                "get_dust_collection_mode",
+                "Show or change how hard the dock empties the bin",
+                (pick("mode", DUST, KEEP),),
+                ("mode",),
+                view=labeled(DUST),
+                setter="set_dust_collection_mode",
+            ),
             Cmd(
                 "auto",
                 "get_dust_collection_switch_status",
@@ -861,10 +1048,21 @@ AREAS = {
             Cmd(
                 "extend",
                 "get_right_brush_stretch_status",
-                "Show whether the side brush extends",
+                "Show or turn side brush extending on or off",
+                (CHANGE,),
+                ("status",),
                 view=switch,
+                setter="set_right_brush_stretch_status",
             ),
-            Cmd("tag", "get_stretch_tag_status", "Show the stretch tag setting", view=switch),
+            Cmd(
+                "tag",
+                "get_stretch_tag_status",
+                "Show or turn the stretch tag on or off",
+                (CHANGE,),
+                ("status",),
+                view=switch,
+                setter="set_stretch_tag_status",
+            ),
         ],
     ),
     "volume": (
@@ -894,8 +1092,11 @@ AREAS = {
             Cmd(
                 "mic",
                 "get_ap_mic_led_status",
-                "Show whether the microphone light is on",
+                "Show or turn the microphone light on or off",
+                (CHANGE,),
+                ("status",),
                 view=switch,
+                setter="set_ap_mic_led_status",
             ),
         ],
     ),
@@ -1021,6 +1222,11 @@ def main():
             print("\n".join(section_lines(args.area, *AREAS[args.area])))
             return
         values = [getattr(args, arg.name) for arg in cmd.args]
+        if cmd.setter and values[-1] is KEEP:
+            values.pop()
+            cmd = cmd._replace(args=cmd.args[:-1], keys=cmd.keys[:-1])
+        elif cmd.setter:
+            cmd = cmd._replace(command=cmd.setter, view=plain)
         if cmd.run is None:
             asyncio.run(send(cmd, payload(cmd, values)))
         elif inspect.iscoroutinefunction(cmd.run):

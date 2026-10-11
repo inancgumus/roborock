@@ -24,6 +24,9 @@ exec roborock offpeak show
 stdout '^Off$'
 exec roborock history list
 stdout '^Cleaned 12 times, 50\.0 m² in 5 h 0 min$'
+stdout '^Records: 1, 2$'
+exec roborock schedules list
+stdout '^None\.$'
 exec roborock clean estimate
 stdout '^Time left: 1 h 5 min of 2 h 29 min$'
 exec roborock parts show
@@ -37,6 +40,24 @@ stdout '^Done\.$'
 vacuum await volume 40
 exec roborock volume show
 stdout '^40%$'
+
+# A code reads as a word, and the word changes it
+exec roborock suction show
+stdout '^Max$'
+exec roborock suction set quiet
+vacuum sent set_custom_mode '[101]'
+exec roborock suction show
+stdout '^Quiet$'
+! exec roborock suction set loud
+stderr 'use one of: quiet, balanced'
+
+# A switch shows its state, or changes it when given on or off
+exec roborock obstacles avoidance
+stdout '^On$'
+exec roborock obstacles avoidance off
+vacuum sent set_collision_avoid_status '{"status": 0}'
+exec roborock obstacles avoidance
+stdout '^Off$'
 
 # Plain words and numbers turn into what the robot expects
 exec roborock clean rooms 1,2

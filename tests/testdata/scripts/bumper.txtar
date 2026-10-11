@@ -21,6 +21,14 @@ vacuum set in_cleaning 2
 vacuum await state 5
 vacuum sent resume_zoned_clean '[]'
 
+# So does a robot that reports its charger as disconnected
+vacuum clear
+vacuum set state 2
+vacuum set error_code 2
+vacuum set in_cleaning 3
+vacuum await state 5
+vacuum sent resume_segment_clean '[]'
+
 # Other errors are left alone
 vacuum clear
 vacuum set state 12

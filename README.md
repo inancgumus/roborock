@@ -42,6 +42,8 @@ Commands are `<area> <verb>`.
 - Run an area alone to list its commands, like `./roborock.py clean`.
 - Add `-h` to a command to see what it needs.
 - Answers are plain text, like `Battery: 87%`.
+- Settings read as words, like `Max`. Give a word to change one.
+- A setting with `[on|off]` turns on or off when you add it, like `obstacles gaps off`.
 
 | Command | What it does |
 | --- | --- |

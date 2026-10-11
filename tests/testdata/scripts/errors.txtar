@@ -26,8 +26,12 @@ stderr "unknown command 'nope'"
 stderr "unknown command 'nope'"
 
 # A method this robot lacks is reported as an error
-! exec roborock schedules list
+! exec roborock schedules summary
 stderr 'does not support that command'
+
+# A change the robot refuses is reported in plain words
+! exec roborock obstacles dirt on
+stderr 'The robot refused the change for now'
 
 # A lost message is sent again
 vacuum drop get_sound_volume 2
